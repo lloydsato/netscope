@@ -1,9 +1,8 @@
 """Shared helpers for netscope: subnet detection, port name lookups, output formatting."""
 
 import ipaddress
+import math
 import socket
-import struct
-import fcntl
 import os
 
 
@@ -48,7 +47,52 @@ COMMON_PORTS = {
     3306: "mysql", 3389: "rdp", 5060: "sip", 5432: "postgres",
     5900: "vnc", 6379: "redis", 8000: "dev-http", 8080: "http-alt",
     8443: "https-alt", 9200: "elasticsearch", 27017: "mongodb",
+    # UDP-common services (port_name is used for both protocols)
+    69: "tftp", 137: "netbios-ns", 138: "netbios-dgm", 162: "snmp-trap",
+    500: "isakmp", 520: "rip", 1900: "ssdp", 5353: "mdns",
 }
+
+# Common UDP service ports worth probing in a UDP sweep. UDP scanning is far
+# less reliable than TCP (no connection handshake), so we keep the default set
+# small and probe each with a service-appropriate payload where we can.
+COMMON_UDP_PORTS = sorted({
+    53, 67, 68, 69, 123, 137, 138, 161, 162, 500, 514, 520, 1900, 5353,
+})
+
+# Scan timing profiles (loosely inspired by nmap's -T templates). Each maps a
+# level 0..5 to concrete knobs: connect timeout, worker count, and per-probe
+# jitter range (seconds). Lower = slower/stealthier, higher = faster/louder.
+TIMING_PROFILES = {
+    0: {"timeout": 4.0, "workers": 4, "jitter": (0.4, 1.2)},   # paranoid
+    1: {"timeout": 3.0, "workers": 8, "jitter": (0.1, 0.5)},   # sneaky
+    2: {"timeout": 2.0, "workers": 20, "jitter": (0.0, 0.15)}, # polite
+    3: {"timeout": 0.75, "workers": 100, "jitter": (0.0, 0.0)},# normal (default)
+    4: {"timeout": 0.5, "workers": 200, "jitter": (0.0, 0.0)}, # aggressive
+    5: {"timeout": 0.3, "workers": 400, "jitter": (0.0, 0.0)}, # insane
+}
+DEFAULT_TIMING = 3
+
+
+def timing_profile(level):
+    """Return the knobs for a timing level, clamped to the valid range."""
+    if level is None:
+        level = DEFAULT_TIMING
+    level = max(0, min(5, int(level)))
+    return {"level": level, **TIMING_PROFILES[level]}
+
+
+def shannon_entropy(s: str) -> float:
+    """Shannon entropy (bits/char) of a string. Used to flag high-entropy DNS
+    labels, a hallmark of DNS tunnelling / DGA domains.
+    """
+    if not s:
+        return 0.0
+    counts = {}
+    for ch in s:
+        counts[ch] = counts.get(ch, 0) + 1
+    n = len(s)
+    return -sum((c / n) * math.log2(c / n) for c in counts.values())
+
 
 # Ports that are worth flagging by default in security checks -- either because
 # they're historically insecure (plaintext creds) or commonly targeted.
