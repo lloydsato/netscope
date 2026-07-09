@@ -129,8 +129,12 @@ def to_json(findings, meta=None, indent=2):
 
 
 def to_ndjson(findings):
-    """Newline-delimited JSON: one finding per line (stream/CI friendly)."""
-    return "\n".join(json.dumps(f, default=str) for f in sort_findings(findings))
+    """Newline-delimited JSON: one finding per line (stream/CI friendly).
+
+    Each record is newline-terminated (the NDJSON convention), so the output
+    ends in a trailing newline and empty input yields an empty string.
+    """
+    return "".join(json.dumps(f, default=str) + "\n" for f in sort_findings(findings))
 
 
 _CSV_COLUMNS = ["severity", "category", "host", "port", "title", "detail", "refs", "cvss"]

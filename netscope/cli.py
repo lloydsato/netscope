@@ -282,6 +282,12 @@ def cmd_security(args):
         for r in results:
             storage.record_ports(conn, r["host"], r["open_ports"])
         print("\nSaved scan results to history.")
+    if args.export:
+        quick_findings = []
+        for r in results:
+            quick_findings += fmod.from_risky_ports(r["host"], r["open_ports"], RISKY_PORTS)
+        emit_findings_export(quick_findings, args.export, args.export_out,
+                             meta={"subnet": subnet, "hosts": len(results), "mode": "quick"})
     if args.json:
         print(json.dumps(results, indent=2))
     return 0
@@ -553,7 +559,7 @@ def build_parser():
     m = sub.add_parser("monitor", help="Alias of 'capture'")
     for a in ("--iface", "--filter", "--pcap", "--gateway"):
         m.add_argument(a, default=None)
-    m.add_argument("--duration", type=int, default=30)
+    m.add_argument("--duration", type=int, default=15)  # match `capture` -- it's an alias
     m.add_argument("--max-packets", type=int, default=0, dest="max_packets")
     m.add_argument("--json", action="store_true")
     m.set_defaults(func=cmd_capture)
