@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.eggs/
+
+# netscope local state / artifacts
+*.db
+*.pcap
+netscope-report.html
+netscope-audit-*.html
+
+# venv / tooling
+.venv/
+venv/
+.pytest_cache/

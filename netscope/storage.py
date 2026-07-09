@@ -55,6 +55,26 @@ def _init_schema(conn):
             type   TEXT NOT NULL,
             detail TEXT
         );
+        CREATE TABLE IF NOT EXISTS scans (
+            id      INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts      INTEGER NOT NULL,
+            subnet  TEXT,
+            label   TEXT,
+            n_hosts INTEGER,
+            summary TEXT            -- JSON: severity counts + risk score
+        );
+        CREATE TABLE IF NOT EXISTS scan_findings (
+            scan_id  INTEGER NOT NULL,
+            fid      TEXT NOT NULL,
+            severity TEXT,
+            category TEXT,
+            host     TEXT,
+            port     INTEGER,
+            title    TEXT,
+            detail   TEXT,
+            refs     TEXT,          -- ';'-joined
+            PRIMARY KEY (scan_id, fid)
+        );
         """
     )
     conn.commit()
@@ -149,3 +169,55 @@ def device_ports(conn, identity: str):
         (identity,),
     ).fetchall()
     return [{**dict(r), "first_seen_h": _iso(r["first_seen"]), "last_seen_h": _iso(r["last_seen"])} for r in rows]
+
+
+# ---------- scan snapshots (for baseline diffing) ----------
+
+def save_scan(conn, findings, subnet=None, label=None, n_hosts=0, summary=None):
+    """Persist an audit snapshot (a scan row + its findings). Returns the scan id."""
+    import json as _json
+    cur = conn.execute(
+        "INSERT INTO scans (ts, subnet, label, n_hosts, summary) VALUES (?,?,?,?,?)",
+        (_now(), subnet, label, n_hosts, _json.dumps(summary or {})),
+    )
+    scan_id = cur.lastrowid
+    for f in findings:
+        conn.execute(
+            "INSERT OR REPLACE INTO scan_findings "
+            "(scan_id, fid, severity, category, host, port, title, detail, refs) "
+            "VALUES (?,?,?,?,?,?,?,?,?)",
+            (scan_id, f["id"], f.get("severity"), f.get("category"), f.get("host"),
+             f.get("port"), f.get("title"), f.get("detail"), ";".join(f.get("refs", []))),
+        )
+    conn.commit()
+    return scan_id
+
+
+def get_scans(conn, limit=20):
+    # Tie-break on id so ordering is deterministic when snapshots share a second.
+    rows = conn.execute("SELECT * FROM scans ORDER BY ts DESC, id DESC LIMIT ?", (limit,)).fetchall()
+    return [{**dict(r), "ts_h": _iso(r["ts"])} for r in rows]
+
+
+def get_scan_findings(conn, scan_id):
+    rows = conn.execute(
+        "SELECT * FROM scan_findings WHERE scan_id=?", (scan_id,)
+    ).fetchall()
+    out = []
+    for r in rows:
+        d = dict(r)
+        d["refs"] = d["refs"].split(";") if d.get("refs") else []
+        out.append(d)
+    return out
+
+
+def diff_scans(conn, old_id, new_id):
+    """Compare two saved scans. Returns {added, resolved, unchanged} finding lists,
+    keyed by finding id (stable across runs for the same issue).
+    """
+    old = {f["fid"]: f for f in get_scan_findings(conn, old_id)}
+    new = {f["fid"]: f for f in get_scan_findings(conn, new_id)}
+    added = [f for fid, f in new.items() if fid not in old]
+    resolved = [f for fid, f in old.items() if fid not in new]
+    unchanged = [f for fid, f in new.items() if fid in old]
+    return {"added": added, "resolved": resolved, "unchanged": unchanged}

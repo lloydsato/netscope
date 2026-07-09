@@ -76,6 +76,49 @@ def _infer(banner: str) -> str:
     return ""
 
 
+# Product + version extraction from banners, the way `nmap -sV` reports
+# ``product`` / ``version``. Each entry maps a regex (with a version capture
+# group) to a canonical product name used to key the offline vuln database.
+# Order matters: more specific patterns should come first.
+_PRODUCT_SIGS = [
+    (re.compile(r"OpenSSH[_/ ]([0-9][\w.]*)", re.I), "openssh"),
+    (re.compile(r"\bnginx/([0-9][\w.]*)", re.I), "nginx"),
+    (re.compile(r"Apache/([0-9][\w.]*)", re.I), "apache_http_server"),
+    (re.compile(r"lighttpd/([0-9][\w.]*)", re.I), "lighttpd"),
+    (re.compile(r"Microsoft-IIS/([0-9][\w.]*)", re.I), "iis"),
+    (re.compile(r"vsftpd\s*([0-9][\w.]*)", re.I), "vsftpd"),
+    (re.compile(r"ProFTPD\s*([0-9][\w.]*)", re.I), "proftpd"),
+    (re.compile(r"Pure-FTPd", re.I), "pure-ftpd"),
+    (re.compile(r"\(?Exim\)?\s*([0-9][\w.]*)", re.I), "exim"),
+    (re.compile(r"Postfix", re.I), "postfix"),
+    (re.compile(r"Dovecot", re.I), "dovecot"),
+    (re.compile(r"\b(?:mysql|mariadb)[- ]?([0-9][\w.]*)", re.I), "mysql"),
+    (re.compile(r"PostgreSQL\s*([0-9][\w.]*)", re.I), "postgresql"),
+    (re.compile(r"redis_version:([0-9][\w.]*)", re.I), "redis"),
+    (re.compile(r"MongoDB[^0-9]*([0-9][\w.]*)", re.I), "mongodb"),
+    (re.compile(r'"number"\s*:\s*"([0-9][\w.]*)"', re.I), "elasticsearch"),
+    (re.compile(r"RouterOS\s*([0-9][\w.]*)", re.I), "routeros"),
+    (re.compile(r"Server:\s*Apache", re.I), "apache_http_server"),
+]
+
+
+def parse_service(banner: str, port: int = None) -> dict:
+    """Best-effort extraction of ``{product, version}`` from a service banner.
+
+    Mirrors what ``nmap -sV`` surfaces so the result can be handed straight to
+    the offline vuln database. ``version`` is "" when a product is recognised
+    but its version isn't advertised.
+    """
+    if not banner:
+        return {"product": "", "version": ""}
+    for pat, product in _PRODUCT_SIGS:
+        m = pat.search(banner)
+        if m:
+            version = m.group(1) if m.groups() else ""
+            return {"product": product, "version": version or ""}
+    return {"product": "", "version": ""}
+
+
 def fingerprint_port(host: str, port: int, timeout: float = 2.0) -> dict:
     if port in _HTTP_PORTS:
         banner = _grab_http(host, port, timeout)
@@ -85,11 +128,14 @@ def fingerprint_port(host: str, port: int, timeout: float = 2.0) -> dict:
         # Try a passive read anyway; many services still greet us.
         banner = _grab_generic(host, port, timeout)
 
+    svc = parse_service(banner, port)
     return {
         "port": port,
         "service": port_name(port),
         "banner": banner,
         "os_hint": _infer(banner),
+        "product": svc["product"],
+        "version": svc["version"],
     }
 
 

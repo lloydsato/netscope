@@ -114,20 +114,64 @@ def _events_block(events):
     </section>"""
 
 
-def render(devices, capture_summary=None, events=None, subnet=None, title="netscope report"):
+def _findings_block(findings, host_scores):
+    if not findings:
+        return ""
+    from . import findings as fmod
+    groups = fmod.by_host(findings)
+    blocks = []
+    for host in sorted(groups, key=lambda h: -host_scores.get(h, 0)):
+        fs = groups[host]
+        score = host_scores.get(host, 0)
+        score_cls = "danger" if score >= 60 else ("watch" if score >= 25 else "ok")
+        rows = []
+        for f in fs:
+            color = _SEV_COLOR.get(f.get("severity"), "var(--muted)")
+            port = f":{_esc(f['port'])}" if f.get("port") else ""
+            refs = " ".join(
+                f'<span class="ref">{_esc(r)}</span>' for r in f.get("refs", [])
+            )
+            rows.append(f"""
+          <li class="alert" style="--sev:{color}">
+            <span class="sev-label" style="color:{color}">{_esc(f.get('severity'))}</span>
+            <span class="alert-msg"><strong>{_esc(f.get('title'))}</strong>{port}
+              <span class="fdetail">{_esc(f.get('detail'))}</span> {refs}</span>
+          </li>""")
+        blocks.append(f"""
+      <div class="host-findings">
+        <div class="host-head"><span class="mono">{_esc(host)}</span>
+          <span class="risk {score_cls}">risk {score}/100</span></div>
+        <ul class="alert-feed">{"".join(rows)}</ul>
+      </div>""")
+    return f"""
+    <section class="panel">
+      <div class="eyebrow">Vulnerability findings &middot; {len(findings)}</div>
+      {"".join(blocks)}
+    </section>"""
+
+
+def render(devices, capture_summary=None, events=None, subnet=None,
+           findings=None, title="netscope report"):
     now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     alerts = capture_summary.get("alerts", []) if capture_summary else []
+    findings = findings or []
+
+    from . import findings as fmod
+    host_scores = fmod.host_risk_scores(findings) if findings else {}
 
     # headline stats
     n_dev = len(devices)
     exposed = sum(len(d.get("ports") or d.get("open_ports") or []) for d in devices)
     n_alerts = len(alerts)
+    n_findings = len(findings)
+    sev_counts = fmod.severity_counts(findings) if findings else {}
     crit = sum(1 for s, _ in alerts if s in ("critical", "high"))
+    crit += sev_counts.get("critical", 0) + sev_counts.get("high", 0)
 
     device_rows = "".join(_device_row(d) for d in devices) or \
         '<tr><td colspan="4" class="muted">No devices discovered.</td></tr>'
 
-    status_class = "danger" if crit else ("watch" if n_alerts else "ok")
+    status_class = "danger" if crit else ("watch" if (n_alerts or n_findings) else "ok")
 
     return f"""<!doctype html>
 <html lang="en">
@@ -206,6 +250,26 @@ def render(devices, capture_summary=None, events=None, subnet=None, title="netsc
   }}
   .ac-dot {{ width:8px; height:8px; border-radius:50%; background:var(--accent); }}
 
+  .host-findings {{ margin-bottom:18px; }}
+  .host-findings:last-child {{ margin-bottom:0; }}
+  .host-head {{
+    display:flex; align-items:center; justify-content:space-between;
+    margin-bottom:10px; padding-bottom:6px; border-bottom:1px solid var(--line);
+  }}
+  .host-head .mono {{ font-size:14px; }}
+  .risk {{
+    font-family:var(--mono); font-size:12px; font-weight:700; padding:2px 8px;
+    border-radius:5px; border:1px solid var(--line);
+  }}
+  .risk.danger {{ color:var(--crit); border-color:var(--crit); background:rgba(255,93,108,0.08); }}
+  .risk.watch {{ color:var(--med); border-color:var(--med); }}
+  .risk.ok {{ color:var(--accent); border-color:rgba(67,216,196,0.35); }}
+  .fdetail {{ color:var(--muted); }}
+  .ref {{
+    display:inline-block; font-family:var(--mono); font-size:11px; color:var(--accent);
+    border:1px solid rgba(67,216,196,0.35); border-radius:4px; padding:0 5px; margin-left:4px;
+  }}
+
   table {{ width:100%; border-collapse:collapse; }}
   thead th {{
     text-align:left; font-size:11px; text-transform:uppercase; letter-spacing:1px;
@@ -256,9 +320,12 @@ def render(devices, capture_summary=None, events=None, subnet=None, title="netsc
       <div class="statline">
         <div class="stat"><span class="n">{n_dev}</span><span class="l">devices</span></div>
         <div class="stat"><span class="n">{exposed}</span><span class="l">open ports</span></div>
+        <div class="stat {status_class}"><span class="n">{n_findings}</span><span class="l">findings</span></div>
         <div class="stat {status_class}"><span class="n">{n_alerts}</span><span class="l">alerts</span></div>
       </div>
     </header>
+
+    {_findings_block(findings, host_scores)}
 
     <section class="panel">
       <div class="eyebrow">Threat feed</div>
@@ -282,8 +349,9 @@ def render(devices, capture_summary=None, events=None, subnet=None, title="netsc
 </html>"""
 
 
-def write_report(path, devices, capture_summary=None, events=None, subnet=None):
-    htmldoc = render(devices, capture_summary, events, subnet)
+def write_report(path, devices, capture_summary=None, events=None, subnet=None,
+                 findings=None):
+    htmldoc = render(devices, capture_summary, events, subnet, findings=findings)
     with open(path, "w", encoding="utf-8") as f:
         f.write(htmldoc)
     return path
