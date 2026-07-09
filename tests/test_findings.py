@@ -59,10 +59,15 @@ class ExportTests(unittest.TestCase):
         self.assertIn("meta", doc)
 
     def test_ndjson_one_per_line(self):
-        lines = F.export(_sample(), "ndjson").splitlines()
+        out = F.export(_sample(), "ndjson")
+        self.assertTrue(out.endswith("\n"))  # each record is newline-terminated
+        lines = out.splitlines()
         self.assertEqual(len(lines), 3)
         for ln in lines:
             json.loads(ln)  # each line is valid JSON
+
+    def test_ndjson_empty(self):
+        self.assertEqual(F.export([], "ndjson"), "")
 
     def test_csv_header_and_rows(self):
         rows = list(csv.reader(io.StringIO(F.export(_sample(), "csv"))))
