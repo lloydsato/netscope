@@ -21,10 +21,11 @@ import os
 RECORDS = [
     # ---- OpenSSH ----
     {
-        "product": "openssh", "affected": "<7.7", "cve": "CVE-2018-15473",
+        "product": "openssh", "affected": "<7.8", "cve": "CVE-2018-15473",
         "cvss": 5.3, "title": "OpenSSH username enumeration",
-        "description": "Pre-7.7 OpenSSH allows remote username enumeration via "
-                       "malformed authentication requests.",
+        "description": "OpenSSH through 7.7 allows remote username enumeration "
+                       "because bailout for an invalid user is not delayed until "
+                       "the request packet is fully parsed.",
         "ref": "https://nvd.nist.gov/vuln/detail/CVE-2018-15473",
     },
     {
@@ -44,24 +45,26 @@ RECORDS = [
     # ---- Apache httpd ----
     {
         "product": "apache_http_server", "affected": "==2.4.49", "cve": "CVE-2021-41773",
-        "cvss": 7.5, "title": "Apache httpd path traversal / RCE (2.4.49)",
+        "cvss": 9.8, "title": "Apache httpd path traversal / RCE (2.4.49)",
         "description": "Path traversal and file disclosure (RCE with mod_cgi) in "
                        "Apache HTTP Server 2.4.49.",
         "ref": "https://nvd.nist.gov/vuln/detail/CVE-2021-41773",
     },
     {
-        "product": "apache_http_server", "affected": "<=2.4.50", "cve": "CVE-2021-42013",
+        "product": "apache_http_server", "affected": ">=2.4.49,<2.4.51", "cve": "CVE-2021-42013",
         "cvss": 9.8, "title": "Apache httpd path traversal / RCE (2.4.50)",
-        "description": "Incomplete fix for CVE-2021-41773; traversal and RCE "
-                       "through 2.4.50.",
+        "description": "Incomplete fix for CVE-2021-41773; path traversal and RCE "
+                       "in Apache HTTP Server 2.4.49 and 2.4.50 only.",
         "ref": "https://nvd.nist.gov/vuln/detail/CVE-2021-42013",
     },
     # ---- nginx ----
     {
-        "product": "nginx", "affected": ">=0.5.6,<1.13.6", "cve": "CVE-2017-7529",
+        "product": "nginx", "affected": ">=0.5.6,<1.12.1 || >=1.13.0,<1.13.3",
+        "cve": "CVE-2017-7529",
         "cvss": 7.5, "title": "nginx range filter integer overflow",
-        "description": "Integer overflow in the range filter can leak cached file "
-                       "contents; fixed in 1.13.6 / 1.12.1.",
+        "description": "Integer overflow in the range filter can leak sensitive "
+                       "information; affects 0.5.6 through 1.13.2, fixed in "
+                       "1.13.3 (mainline) and 1.12.1 (stable).",
         "ref": "https://nvd.nist.gov/vuln/detail/CVE-2017-7529",
     },
     # ---- vsftpd ----
@@ -74,15 +77,16 @@ RECORDS = [
     },
     # ---- ProFTPD ----
     {
-        "product": "proftpd", "affected": ">=1.3.5,<1.3.5a", "cve": "CVE-2015-3306",
+        "product": "proftpd", "affected": "==1.3.5", "cve": "CVE-2015-3306",
         "cvss": 10.0, "title": "ProFTPD mod_copy unauthenticated RCE",
-        "description": "SITE CPFR/CPTO in mod_copy lets unauthenticated users "
-                       "copy files, leading to remote code execution.",
+        "description": "SITE CPFR/CPTO in the mod_copy module of ProFTPD 1.3.5 lets "
+                       "unauthenticated users read and write arbitrary files, "
+                       "leading to remote code execution.",
         "ref": "https://nvd.nist.gov/vuln/detail/CVE-2015-3306",
     },
     # ---- Exim ----
     {
-        "product": "exim", "affected": ">=4.87,<4.91", "cve": "CVE-2019-10149",
+        "product": "exim", "affected": ">=4.87,<4.92", "cve": "CVE-2019-10149",
         "cvss": 9.8, "title": "Exim 'Return of the Wizard' RCE",
         "description": "Improper validation of the recipient address allows remote "
                        "command execution (4.87 through 4.91).",
@@ -90,34 +94,43 @@ RECORDS = [
     },
     # ---- Redis ----
     {
-        "product": "redis", "affected": "<7.0.12", "cve": "CVE-2023-28425",
-        "cvss": 6.5, "title": "Redis MSETNX denial of service",
-        "description": "A specially crafted MSETNX command can crash the server "
-                       "in versions before 7.0.12.",
+        "product": "redis", "affected": ">=7.0.8,<7.0.10", "cve": "CVE-2023-28425",
+        "cvss": 5.5, "title": "Redis MSETNX denial of service",
+        "description": "Authenticated users can use the MSETNX command to trigger "
+                       "a runtime assertion and terminate the server in Redis "
+                       "7.0.8 through 7.0.9; fixed in 7.0.10.",
         "ref": "https://nvd.nist.gov/vuln/detail/CVE-2023-28425",
     },
     # ---- Elasticsearch ----
     {
-        "product": "elasticsearch", "affected": ">=1.2.0,<1.6.1", "cve": "CVE-2015-1427",
+        "product": "elasticsearch", "affected": "<1.3.8 || >=1.4.0,<1.4.3",
+        "cve": "CVE-2015-1427",
         "cvss": 9.8, "title": "Elasticsearch Groovy sandbox RCE",
         "description": "The Groovy scripting engine sandbox can be bypassed for "
-                       "remote code execution (1.2.0 through 1.6.0).",
+                       "remote code execution in versions before 1.3.8 and 1.4.x "
+                       "before 1.4.3.",
         "ref": "https://nvd.nist.gov/vuln/detail/CVE-2015-1427",
     },
     # ---- MongoDB ----
     {
-        "product": "mongodb", "affected": "<2.6.0", "cve": "CVE-2013-1892",
-        "cvss": 8.5, "title": "MongoDB nativeHelper RCE",
-        "description": "The nativeHelper.apply function permits arbitrary code "
-                       "execution against pre-2.6 servers.",
+        "product": "mongodb", "affected": "<2.0.9 || >=2.2.0,<2.2.4", "cve": "CVE-2013-1892",
+        "cvss": 6.0, "title": "MongoDB nativeHelper memory corruption / RCE",
+        "description": "Improper validation of requests to nativeHelper in "
+                       "SpiderMonkey lets authenticated users crash the server or "
+                       "execute code in versions before 2.0.9 and 2.2.x before "
+                       "2.2.4.",
         "ref": "https://nvd.nist.gov/vuln/detail/CVE-2013-1892",
     },
     # ---- MikroTik RouterOS ----
     {
         "product": "routeros", "affected": ">=6.29,<6.42.1", "cve": "CVE-2018-14847",
         "cvss": 9.1, "title": "MikroTik Winbox path traversal (credential disclosure)",
-        "description": "Winbox allows unauthenticated remote attackers to read "
-                       "files including the user database (Chimay Red / VPNFilter).",
+        "description": "Directory traversal in the WinBox interface lets "
+                       "unauthenticated remote attackers read arbitrary files "
+                       "(including the user database) and authenticated attackers "
+                       "write files. Affects 6.29 through 6.42; fixed in 6.42.1 "
+                       "(and the 6.41.3 / 6.40.8 backports, which this range "
+                       "conservatively still flags).",
         "ref": "https://nvd.nist.gov/vuln/detail/CVE-2018-14847",
     },
 ]
@@ -142,7 +155,10 @@ def build():
     os.makedirs(out_dir, exist_ok=True)
     out_path = os.path.join(out_dir, "vulns.json.gz")
     raw = json.dumps(data, separators=(",", ":")).encode("utf-8")
-    with gzip.open(out_path, "wb") as f:
+    # mtime=0 and an empty stored filename keep the output byte-for-byte
+    # reproducible, so re-running the script doesn't dirty the repo.
+    with open(out_path, "wb") as raw_out, \
+            gzip.GzipFile(filename="", mode="wb", fileobj=raw_out, mtime=0) as f:
         f.write(raw)
     print(f"Wrote {out_path} ({len(RECORDS)} records, {len(raw)} bytes uncompressed JSON)")
 

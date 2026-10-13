@@ -113,6 +113,17 @@ RISKY_PORTS = {
 }
 
 
+def safe_text(value, limit: int = 253) -> str:
+    """Make attacker-controlled text (DNS names, SNI, banners) safe to print.
+
+    Anything outside printable ASCII -- notably ESC and other control bytes that
+    a hostile host on the LAN could embed to rewrite an analyst's terminal -- is
+    replaced with '?'. Truncated to ``limit`` characters.
+    """
+    text = str(value if value is not None else "")
+    return "".join(ch if " " <= ch <= "~" else "?" for ch in text)[:limit]
+
+
 def port_name(port: int) -> str:
     return COMMON_PORTS.get(port, "unknown")
 

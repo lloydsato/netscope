@@ -5,6 +5,7 @@ new since last time?" -- the foundation for change detection and monitoring.
 Stored at ~/.netscope/netscope.db by default.
 """
 
+import json
 import os
 import sqlite3
 import time
@@ -22,8 +23,10 @@ def _iso(ts):
 
 
 def connect(db_path: str = None):
-    db_path = db_path or DEFAULT_DB
-    os.makedirs(os.path.dirname(db_path), exist_ok=True)
+    db_path = os.path.expanduser(db_path or DEFAULT_DB)
+    # dirname() is "" for a bare filename like "audits.db"; makedirs("") raises.
+    db_dir = os.path.dirname(os.path.abspath(db_path))
+    os.makedirs(db_dir, exist_ok=True)
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     _init_schema(conn)
@@ -49,6 +52,10 @@ def _init_schema(conn):
             first_seen INTEGER NOT NULL,
             last_seen  INTEGER NOT NULL,
             PRIMARY KEY (identity, port)
+        );
+        CREATE TABLE IF NOT EXISTS port_scans (
+            identity TEXT PRIMARY KEY,   -- device whose ports have been recorded at least once
+            ts       INTEGER NOT NULL
         );
         CREATE TABLE IF NOT EXISTS events (
             ts     INTEGER NOT NULL,
@@ -131,8 +138,21 @@ def record_ports(conn, identity: str, open_ports):
                 "UPDATE ports SET last_seen=?, service=COALESCE(?,service) WHERE identity=? AND port=?",
                 (now, service, identity, port),
             )
+    conn.execute("INSERT OR REPLACE INTO port_scans (identity, ts) VALUES (?,?)", (identity, now))
     conn.commit()
     return new_ports
+
+
+def has_port_baseline(conn, identity: str) -> bool:
+    """True once this device's open ports have been recorded at least once.
+
+    Distinguishes "never port-scanned" (everything is new; don't alert) from
+    "scanned before and had no open ports" (a newly opened port *is* news). DBs
+    written by older versions have no marker, so existing port rows count too.
+    """
+    if conn.execute("SELECT 1 FROM port_scans WHERE identity=?", (identity,)).fetchone():
+        return True
+    return conn.execute("SELECT 1 FROM ports WHERE identity=? LIMIT 1", (identity,)).fetchone() is not None
 
 
 def get_known_ports(conn, identity: str):
@@ -143,6 +163,10 @@ def get_known_ports(conn, identity: str):
 def record_event(conn, etype: str, detail: str = ""):
     conn.execute("INSERT INTO events (ts, type, detail) VALUES (?,?,?)", (_now(), etype, detail))
     conn.commit()
+
+
+def device_count(conn) -> int:
+    return conn.execute("SELECT COUNT(*) FROM devices").fetchone()[0]
 
 
 def get_devices(conn):
@@ -175,10 +199,9 @@ def device_ports(conn, identity: str):
 
 def save_scan(conn, findings, subnet=None, label=None, n_hosts=0, summary=None):
     """Persist an audit snapshot (a scan row + its findings). Returns the scan id."""
-    import json as _json
     cur = conn.execute(
         "INSERT INTO scans (ts, subnet, label, n_hosts, summary) VALUES (?,?,?,?,?)",
-        (_now(), subnet, label, n_hosts, _json.dumps(summary or {})),
+        (_now(), subnet, label, n_hosts, json.dumps(summary or {})),
     )
     scan_id = cur.lastrowid
     for f in findings:
@@ -199,6 +222,26 @@ def get_scans(conn, limit=20):
     return [{**dict(r), "ts_h": _iso(r["ts"])} for r in rows]
 
 
+def get_scan(conn, scan_id):
+    """One snapshot row by id, or None if there is no such snapshot."""
+    r = conn.execute("SELECT * FROM scans WHERE id=?", (scan_id,)).fetchone()
+    return {**dict(r), "ts_h": _iso(r["ts"])} if r else None
+
+
+def previous_scan(conn, scan_id):
+    """The newest snapshot taken before ``scan_id`` of the *same target* (same
+    subnet/host), or None. Diffing against a snapshot of a different target would
+    report every finding as new/resolved."""
+    cur = get_scan(conn, scan_id)
+    if not cur:
+        return None
+    r = conn.execute(
+        "SELECT * FROM scans WHERE id < ? AND subnet IS ? ORDER BY id DESC LIMIT 1",
+        (scan_id, cur["subnet"]),
+    ).fetchone()
+    return {**dict(r), "ts_h": _iso(r["ts"])} if r else None
+
+
 def get_scan_findings(conn, scan_id):
     rows = conn.execute(
         "SELECT * FROM scan_findings WHERE scan_id=?", (scan_id,)
@@ -207,6 +250,7 @@ def get_scan_findings(conn, scan_id):
     for r in rows:
         d = dict(r)
         d["refs"] = d["refs"].split(";") if d.get("refs") else []
+        d["id"] = d["fid"]          # same key as live findings, so exports are uniform
         out.append(d)
     return out
 

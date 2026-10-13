@@ -136,7 +136,11 @@ netscope tls mail.lan:993
 ```
 
 Reports the certificate identity/expiry, negotiated protocol and cipher, and
-flags expired/self-signed certs, obsolete protocols, and weak ciphers.
+flags expired/expiring/self-signed certs, weak signature algorithms (SHA-1/MD5),
+hostname mismatches, weak ciphers, and **obsolete protocols**. Because a server
+that speaks TLS 1.3 may *also* still accept TLS 1.0/1.1, those two versions are
+probed individually with a deliberately permissive client -- so legacy-only
+servers are audited rather than reported as "not TLS".
 
 ### `snmp` -- check for default community strings
 
@@ -146,7 +150,9 @@ netscope snmp 192.168.1.1 --communities public,private,community
 ```
 
 Flags a device that answers SNMP with a default community string (reads only
-the system description as evidence).
+the system description as evidence). Each community is tried as both SNMPv1 and
+v2c at once, replies are parsed and matched to the request (so an unrelated UDP
+service can't produce a false hit), and a closed port returns immediately.
 
 ### `diff` -- what changed between two audits
 
@@ -159,6 +165,13 @@ Shows **new** and **resolved** findings between saved snapshots -- track
 remediation, or catch drift, over time. Snapshots come from `audit --save` or
 `security --deep --save`.
 
+By default a snapshot is compared with the previous snapshot **of the same
+target** (same subnet / `--host`), so auditing several targets into one database
+doesn't produce nonsense diffs. `--old` and `--new` must be given together and
+must name existing snapshots; comparing different targets prints a warning.
+Findings whose text changes daily (e.g. "certificate expires in N days") keep a
+stable identity, so they aren't reported as new + resolved every run.
+
 ### `capture` -- capture traffic and detect threats
 
 ```bash
@@ -170,9 +183,12 @@ netscope capture --read existing.pcap                 # offline analysis, no roo
 
 Prints protocol breakdown, top bandwidth, top DNS lookups, top TLS destinations
 (SNI), and a **threat feed** of anything suspicious (ARP spoofing, rogue DHCP,
-port scans, plaintext protocols, **C2 beaconing**, **DNS tunnelling**). Live
-capture needs root; `--read FILE.pcap` runs every detection on an existing
-capture with **no root required**. Pass `--gateway` to sharpen the ARP/DHCP
+port scans, plaintext protocols, **C2 beaconing**, **DNS tunnelling**). Port scans are recognised by *spread* (many ports on one host, or one
+non-web port across many hosts), not by raw SYN counts, and cleartext
+Telnet/FTP is only reported once data actually flows. Captured names (DNS, SNI)
+are sanitised before display. Detection is IPv4-only (IPv6 traffic is counted
+but not analysed). Live capture needs root; `--read FILE.pcap` runs every
+detection on an existing capture with **no root required**. Pass `--gateway` to sharpen the ARP/DHCP
 checks and `--pcap` to save a file for Wireshark.
 
 ### `watch` -- continuous monitoring with alerts
@@ -185,7 +201,15 @@ sudo netscope watch --webhook https://hooks.slack.com/services/XXX
 
 Re-discovers on each interval, diffs against history, and alerts on new devices
 and (with `--scan-ports`) newly-opened ports. Alerts print, get logged to the
-event history, and can be POSTed to a Slack/Discord/ntfy webhook.
+event history, and can be POSTed to a Slack/Discord/ntfy webhook (`http(s)://`
+only; a failing webhook is reported once on stderr, never silently).
+
+The first run against an empty database only **establishes a baseline** (no
+alerts for devices that were already there), and a device's open ports are only
+compared once they have been recorded at least once. `--scan-ports` checks the
+same ~40 common ports as `portscan`'s default -- a listener on an arbitrary high
+port won't be noticed. A transient error mid-run is logged and retried on the
+next round instead of ending the monitor.
 
 ### `security` -- sweep for risky exposed ports
 
@@ -233,7 +257,13 @@ closed; on hosts/paths that rate-limit or drop ICMP, closed ports show as
 
 ## JSON output
 
-Most commands accept `--json` for structured output you can pipe elsewhere.
+Most commands accept `--json` for structured output you can pipe elsewhere
+(`netscope portscan 192.168.1.1 --json | jq`). With `--json` -- or with
+`--export FORMAT` and no `--export-out` -- **stdout carries only the payload**;
+all progress and summary text goes to stderr. Empty results are still valid
+documents (`[]`, or an object with empty lists). `--json` and a stdout `--export`
+can't be combined (use `--export-out FILE`). Exit codes: `0` ok, `1` runtime
+error (printed as `Error: ...`), `2` bad arguments, `130` interrupted.
 
 ## Project layout
 
@@ -265,9 +295,12 @@ curated list in `scripts/build_vulndb.py` -- edit it and re-run to regenerate
 ## Findings export & CI
 
 `audit`, `security --deep`, and `diff` accept `--export {json,ndjson,csv,sarif}`
-(with `--export-out FILE`). SARIF 2.1.0 output can be uploaded to GitHub code
-scanning, so a scheduled `netscope audit --export sarif` becomes a network
-posture check in CI.
+(with `--export-out FILE`). SARIF 2.1.0 output (validated against the
+official schema) can be uploaded to GitHub code scanning, so a scheduled
+`netscope audit --export sarif` becomes a network posture check in CI. Network
+findings have no source file, so each result is anchored to a synthetic location
+`netscope/<host>/<port>` (code scanning only displays results that have one) and
+carries a `partialFingerprints` id so alerts track across runs.
 
 ## A note on the plaintext / credential detection
 
@@ -276,3 +309,33 @@ happening and between which hosts, so you can go fix it. It is intentionally
 built to surface the *exposure*, not to decode, store, or display the actual
 usernames and passwords -- this keeps it a defensive auditing tool rather than a
 credential sniffer.
+
+## Accuracy notes & known limitations
+
+netscope is an auditing aid, not an oracle. Things to keep in mind when reading
+its output:
+
+- **CVE matching is banner-based.** A distro that backports a fix (Debian,
+  Ubuntu, RHEL) keeps the old version string, so a patched `OpenSSH 7.4p1` still
+  matches advisories for 7.4. Treat CVE findings as "verify this", not proof. The
+  bundled snapshot is small and curated; each record's affected range was checked
+  against NVD (nginx against the vendor's own advisory). Regenerate with
+  `python scripts/build_vulndb.py`; a test keeps the shipped file in sync with
+  that script.
+- **Version detection needs a version to be advertised.** Products are only
+  identified from banners (SSH/FTP/SMTP greetings, HTTP `Server:` headers, Redis
+  `INFO`, the Elasticsearch root document, MikroTik banners). Hardened services
+  that hide their version, and MongoDB (whose version isn't in any banner), report
+  no version -- so no CVE correlation for them. HTTP(S) servers on non-standard
+  ports are found by an HTTP fallback probe.
+- **Weak-auth probes only report what they confirm.** MongoDB is checked with
+  `hostInfo`, which needs authentication on a secured server -- `isMaster` is
+  answered by every mongod and proves nothing. Timeouts, auth-required replies and
+  malformed data produce *no* finding rather than a guess.
+- **IPv4 only.** Discovery, scanning and capture analysis are IPv4. Subnets larger
+  than a /16 are refused. Default subnet auto-detection assumes a /24.
+- **Discovery.** ARP needs root. The non-root TCP sweep treats a refused (RST)
+  connection as "host is up", but silently-dropping hosts are missed.
+- **Passive detection is heuristic.** Beaconing, DNS-tunnelling, port-scan and
+  ARP-spoof checks can false-positive on unusual-but-legitimate traffic (VRRP,
+  proxy ARP, DHCP servers that aren't the gateway when `--gateway` is given).

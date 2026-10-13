@@ -18,9 +18,9 @@ from .utils import RISKY_PORTS
 _TLS_PORTS = {443, 8443, 993, 995, 465, 5061, 989, 990, 636}
 
 
-def check_host(host: str, ports=None):
+def check_host(host: str, ports=None, timing=None):
     """Scan one host and annotate any open ports that are considered risky."""
-    open_ports = portscan.scan(host, ports=ports)
+    open_ports = portscan.scan(host, ports=ports, timing=timing)
     for entry in open_ports:
         entry["risk"] = RISKY_PORTS.get(entry["port"])
     findings = [e for e in open_ports if e["risk"]]
@@ -31,12 +31,12 @@ def check_host(host: str, ports=None):
     }
 
 
-def check_hosts(hosts, ports=None, max_workers_hint=None):
+def check_hosts(hosts, ports=None, timing=None):
     """Scan multiple hosts (e.g. everything discovery.discover() found)."""
     results = []
     for h in hosts:
         ip = h["ip"] if isinstance(h, dict) else h
-        results.append(check_host(ip, ports=ports))
+        results.append(check_host(ip, ports=ports, timing=timing))
     return results
 
 

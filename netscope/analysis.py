@@ -60,6 +60,52 @@ def detect_rogue_dhcp(dhcp_servers, expected_gateway=None):
     return findings
 
 
+# Ports so commonly contacted en masse by ordinary clients (a browser or phone
+# talking to dozens of CDN/tracker hosts) that fan-out on them is not a signal.
+_NOISY_FANOUT_PORTS = {53, 80, 123, 443, 853, 993, 5228, 5223, 8080, 8443}
+
+
+def detect_port_scans(syn_targets, min_ports=15, min_hosts=25):
+    """Spot port scanning from connection attempts.
+
+    syn_targets: {src_ip: {dst_ip: {dport, ...}}} built from SYN-without-ACK
+    packets. A raw SYN count is a poor signal -- a browser opening 30 connections
+    to one CDN sends 30 SYNs -- so instead look at *spread*:
+
+    - vertical:   one source probing >= ``min_ports`` distinct ports on one host
+    - horizontal: one source probing the same (non-web) port on >= ``min_hosts``
+                  distinct hosts (a sweep for SSH/SMB/RDP...)
+    """
+    findings = []
+    for src, by_dst in syn_targets.items():
+        total = sum(len(ports) for ports in by_dst.values())
+        if not by_dst:
+            continue
+        dst, ports = max(by_dst.items(), key=lambda kv: len(kv[1]))
+        if len(ports) >= min_ports:
+            findings.append({
+                "ip": src, "kind": "vertical", "target": dst, "ports": len(ports),
+                "syn_count": total, "severity": "high",
+                "note": f"{src} probed {len(ports)} different ports on {dst}",
+            })
+            continue
+        by_port = {}
+        for d, pset in by_dst.items():
+            for port in pset:
+                if port not in _NOISY_FANOUT_PORTS:
+                    by_port.setdefault(port, set()).add(d)
+        if by_port:
+            port, dsts = max(by_port.items(), key=lambda kv: len(kv[1]))
+            if len(dsts) >= min_hosts:
+                findings.append({
+                    "ip": src, "kind": "horizontal", "target": f"port {port}", "ports": 1,
+                    "hosts": len(dsts), "syn_count": total, "severity": "high",
+                    "note": f"{src} probed port {port} on {len(dsts)} different hosts",
+                })
+    findings.sort(key=lambda f: -f["syn_count"])
+    return findings
+
+
 def detect_beaconing(conn_times, min_events=6, max_cv=0.25):
     """Spot regular, machine-like beaconing (a hallmark of C2 / malware check-ins).
 
@@ -140,7 +186,8 @@ def summarize_findings(analysis):
     for f in analysis.get("dhcp_findings", []):
         alerts.append((f["severity"], f"DHCP: {f['note']} ({', '.join(f['servers'])})"))
     for s in analysis.get("possible_scanners", []):
-        alerts.append(("high", f"SCAN: {s['ip']} sent {s['syn_count']} half-open SYNs -- likely port scanning"))
+        alerts.append((s.get("severity", "high"),
+                       f"SCAN: {s.get('note') or s['ip']} ({s['syn_count']} SYNs) -- likely port scanning"))
     for b in analysis.get("beaconing", []):
         alerts.append((b["severity"], f"BEACON: {b['note']}"))
     for d in analysis.get("dns_tunneling", []):

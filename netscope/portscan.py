@@ -42,13 +42,40 @@ _UDP_PROBES = {
 }
 
 
+def _clean_ports(ports):
+    """Validate and de-duplicate a port collection (order preserved).
+
+    Raises ValueError for anything outside 1-65535 or not an integer; without
+    this an out-of-range port makes ``connect_ex`` raise OverflowError (not an
+    OSError) from a worker thread and abort the whole scan.
+    """
+    out, seen = [], set()
+    for p in ports:
+        if isinstance(p, bool) or not isinstance(p, int):
+            raise ValueError(f"invalid port {p!r}: ports must be integers")
+        if not 1 <= p <= 65535:
+            raise ValueError(f"invalid port {p}: must be between 1 and 65535")
+        if p not in seen:
+            seen.add(p)
+            out.append(p)
+    return out
+
+
+def _resolve(host: str) -> str:
+    """Resolve once up front (clear error) so workers don't each do a DNS lookup."""
+    try:
+        return socket.gethostbyname(host)
+    except (socket.gaierror, UnicodeError) as e:
+        raise RuntimeError(f"Could not resolve host '{host}': {e}") from e
+
+
 def scan_port(host: str, port: int, timeout: float = 0.75):
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             s.settimeout(timeout)
             if s.connect_ex((host, port)) == 0:
                 return port
-    except OSError:
+    except (OSError, OverflowError):
         pass
     return None
 
@@ -62,17 +89,15 @@ def scan(host: str, ports=None, max_workers: int = None, timeout: float = None,
     `timing` (0..5) sets connect timeout / concurrency / jitter; explicit
     `max_workers` / `timeout` override the profile.
     """
-    ports = list(ports) if ports is not None else list(COMMON_SCAN_PORTS)
+    ports = _clean_ports(ports if ports is not None else COMMON_SCAN_PORTS)
     prof = timing_profile(timing)
     timeout = prof["timeout"] if timeout is None else timeout
     max_workers = prof["workers"] if max_workers is None else max_workers
     jitter = prof["jitter"]
 
-    # Resolve hostname once up front so errors are clear.
-    try:
-        socket.gethostbyname(host)
-    except socket.gaierror as e:
-        raise RuntimeError(f"Could not resolve host '{host}': {e}") from e
+    ip = _resolve(host)
+    if not ports:
+        return []
 
     # Randomise port order so a scan is less obviously sequential.
     random.shuffle(ports)
@@ -81,7 +106,7 @@ def scan(host: str, ports=None, max_workers: int = None, timeout: float = None,
         lo, hi = jitter
         if hi > 0:
             time.sleep(random.uniform(lo, hi))
-        return scan_port(host, p, timeout)
+        return scan_port(ip, p, timeout)
 
     open_ports = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as ex:
@@ -104,16 +129,17 @@ def scan_udp_port(host: str, port: int, timeout: float = 1.5):
             s.connect((host, port))          # so ICMP errors come back to us
             s.send(probe)
             try:
-                data = s.recv(1024)
-                # Any application-layer reply means the port is definitively open.
-                return "open" if data is not None else "open|filtered"
+                s.recv(1024)
+                # Any application-layer reply (even an empty datagram) means the
+                # port is definitively open.
+                return "open"
             except socket.timeout:
                 # No reply and no ICMP error -> can't tell if open or filtered.
                 return "open|filtered"
             except ConnectionRefusedError:
                 # ICMP port-unreachable delivered as ECONNREFUSED -> closed.
                 return "closed"
-    except OSError:
+    except (OSError, OverflowError):
         return "open|filtered"
 
 
@@ -121,15 +147,14 @@ def scan_udp(host: str, ports=None, max_workers: int = 50, timeout: float = 1.5)
     """UDP sweep. Returns sorted list of {port, service, state} for ports that
     are 'open' or 'open|filtered' (closed ports are omitted).
     """
-    ports = list(ports) if ports is not None else list(COMMON_UDP_PORTS)
-    try:
-        socket.gethostbyname(host)
-    except socket.gaierror as e:
-        raise RuntimeError(f"Could not resolve host '{host}': {e}") from e
+    ports = _clean_ports(ports if ports is not None else COMMON_UDP_PORTS)
+    ip = _resolve(host)
+    if not ports:
+        return []
 
     results = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as ex:
-        futures = {ex.submit(scan_udp_port, host, p, timeout): p for p in ports}
+        futures = {ex.submit(scan_udp_port, ip, p, timeout): p for p in ports}
         for fut in concurrent.futures.as_completed(futures):
             port = futures[fut]
             state = fut.result()

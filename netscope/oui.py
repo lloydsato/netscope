@@ -11,6 +11,7 @@ import gzip
 import json
 import os
 import functools
+import warnings
 
 _DATA_PATH = os.path.join(os.path.dirname(__file__), "data", "oui.json.gz")
 
@@ -20,7 +21,12 @@ def _load_db():
     try:
         with gzip.open(_DATA_PATH, "rb") as f:
             return json.loads(f.read().decode("utf-8"))
-    except Exception:
+    except Exception as e:  # noqa: BLE001
+        warnings.warn(
+            f"netscope: could not load the bundled OUI database ({_DATA_PATH}: {e}); "
+            f"vendor lookups will report 'unknown'.",
+            RuntimeWarning, stacklevel=2,
+        )
         return {}
 
 
