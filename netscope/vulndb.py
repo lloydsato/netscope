@@ -28,6 +28,7 @@ import gzip
 import json
 import os
 import re
+import warnings
 
 _DATA_PATH = os.path.join(os.path.dirname(__file__), "data", "vulns.json.gz")
 
@@ -37,18 +38,49 @@ def _load_db():
     try:
         with gzip.open(_DATA_PATH, "rb") as f:
             return json.loads(f.read().decode("utf-8"))
-    except Exception:
+    except Exception as e:  # noqa: BLE001
+        # Failing silently would make every audit look clean; say so once.
+        warnings.warn(
+            f"netscope: could not load the bundled vulnerability database "
+            f"({_DATA_PATH}: {e}); CVE correlation is DISABLED for this run.",
+            RuntimeWarning, stacklevel=2,
+        )
         return {"records": [], "weak_defaults": {}}
 
 
-def _version_tuple(v: str):
-    """Split a version like '7.2p2' or '1.4.10' into a comparable tuple.
+_TOKEN_RE = re.compile(r"\d+|[A-Za-z]+")
 
-    Every run of digits becomes one component, in order, so patch-level suffixes
-    are preserved: '7.2p2' -> (7, 2, 2), '9.3p1' -> (9, 3, 1), '2.4.49' ->
-    (2, 4, 49). This keeps boundary comparisons (e.g. 9.3p1 < 9.3p2) correct.
+# Words that mark a version as *older* than the bare release ('2.0rc1' < '2.0').
+# Any other letter run is a post-release marker ('1.3.5a' > '1.3.5', '7.2p2' >
+# '7.2'), which is the convention of the services netscope fingerprints
+# (OpenSSH 'p', ProFTPD/OpenSSL trailing letters).
+_PRERELEASE_RANK = {
+    "dev": -5, "snapshot": -5, "nightly": -5, "alpha": -4, "beta": -3,
+    "pre": -2, "preview": -2, "rc": -1,
+}
+
+
+def _letter_rank(word: str) -> int:
+    word = word.lower()
+    if word in _PRERELEASE_RANK:
+        return _PRERELEASE_RANK[word]
+    rank = 0
+    for ch in word:
+        rank = rank * 27 + (ord(ch) - 96 if "a" <= ch <= "z" else 0)
+    return rank
+
+
+def _version_tuple(v: str):
+    """Split a version like '7.2p2' or '1.3.5a' into a comparable tuple.
+
+    Digit runs become integers and letter runs become a rank, in order, so
+    suffixes are preserved and ordered sensibly: '7.2p2' < '7.2p3', '1.3.5' <
+    '1.3.5a' < '1.3.5b', and '2.0rc1' < '2.0'. Shorter versions are treated as
+    zero-padded by ``_cmp``.
     """
-    parts = [int(x) for x in re.findall(r"\d+", str(v))]
+    parts = []
+    for tok in _TOKEN_RE.findall(str(v)):
+        parts.append(int(tok) if tok.isdigit() else _letter_rank(tok))
     return tuple(parts) if parts else (0,)
 
 
@@ -69,14 +101,28 @@ def _version_match(version: str, predicate: str) -> bool:
     - "<=1.2.3"           less than or equal
     - ">=3.0,<3.4"        comma-joined AND of clauses
     - "==2.4.49" / "2.4.49"  exact match
+    - "<1.3.8 || >=1.4.0,<1.4.3"  '||'-joined alternatives (any may match), for
+      products whose affected releases span disjoint branches
+
+    Prefer an exclusive upper bound at the next release ('<7.8') over an
+    inclusive one ('<=7.7'): suffixed versions such as '7.7p1' sort *after*
+    '7.7', so '<=7.7' would wrongly exclude them.
     """
+    predicate = (predicate or "").strip()
     if not version:
         # No version advertised -> we can't confirm the range; be conservative
         # and only match wildcard predicates.
-        return predicate.strip() == "*"
-    predicate = predicate.strip()
+        return predicate == "*"
     if predicate == "*":
         return True
+    return any(_clauses_match(version, alt) for alt in predicate.split("||"))
+
+
+def _clauses_match(version: str, predicate: str) -> bool:
+    """Evaluate one comma-joined AND of clauses against ``version``."""
+    predicate = predicate.strip()
+    if not predicate:
+        return False
     for clause in predicate.split(","):
         clause = clause.strip()
         m = re.match(r"(<=|>=|<|>|==)?\s*(.+)", clause)

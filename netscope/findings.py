@@ -29,6 +29,9 @@ import hashlib
 import io
 import json
 import math
+import re
+
+from . import __version__
 
 SEVERITIES = ("critical", "high", "medium", "low", "info")
 
@@ -45,11 +48,18 @@ _SARIF_LEVEL = {
 
 
 def make_finding(category, severity, title, host="", port=None, detail="",
-                 evidence="", refs=None, cvss=None):
-    """Build a normalised finding dict with a stable, content-derived id."""
+                 evidence="", refs=None, cvss=None, key=None):
+    """Build a normalised finding dict with a stable, content-derived id.
+
+    The id is derived from category/host/port/title plus ``key`` (default: the
+    ``detail`` text). Pass an explicit ``key`` when the human-readable detail
+    contains values that change between runs (e.g. "expires in 12 days"), so
+    the same underlying issue keeps one id and ``diff`` doesn't report it as a
+    new finding every day.
+    """
     severity = severity if severity in _SEV_RANK else "info"
     refs = list(refs) if refs else []
-    basis = f"{category}|{host}|{port}|{title}|{detail}"
+    basis = f"{category}|{host}|{port}|{title}|{detail if key is None else key}"
     fid = hashlib.sha1(basis.encode("utf-8", "replace")).hexdigest()[:12]
     return {
         "id": fid,
@@ -154,10 +164,29 @@ def to_csv(findings):
     return buf.getvalue()
 
 
-def to_sarif(findings, tool_version="0.3.0"):
-    """Minimal SARIF 2.1.0. One run, one rule per finding category, one result
-    per finding. Uploadable to GitHub code scanning and other SARIF consumers.
+def _sarif_artifact_uri(finding):
+    """Synthetic relative URI for a finding that has no source file.
+
+    GitHub code scanning only displays results that carry a ``physicalLocation``,
+    so a network finding is anchored to a stable pseudo-path, ``netscope/<host>[/<port>]``.
     """
+    # Hosts are normally IPs/hostnames, but never let one add path structure:
+    # keep a conservative character set and collapse '..' so the URI cannot climb
+    # out of the pseudo-directory (e.g. a host of '../../etc/passwd').
+    host = re.sub(r"[^A-Za-z0-9._-]", "_", str(finding.get("host") or "network"))
+    while ".." in host:
+        host = host.replace("..", "_")
+    path = f"netscope/{host}"
+    if finding.get("port"):
+        path += f"/{finding['port']}"
+    return path
+
+
+def to_sarif(findings, tool_version=None):
+    """SARIF 2.1.0. One run, one rule per finding category, one result per
+    finding. Uploadable to GitHub code scanning and other SARIF consumers.
+    """
+    tool_version = tool_version or __version__
     findings = sort_findings(findings)
     categories = {}
     for f in findings:
@@ -191,9 +220,16 @@ def to_sarif(findings, tool_version="0.3.0"):
                 "evidence": f.get("evidence", ""),
             },
             "locations": [{
-                "logicalLocations": [{"fullyQualifiedName": loc_text}]
+                "physicalLocation": {
+                    "artifactLocation": {"uri": _sarif_artifact_uri(f)},
+                    "region": {"startLine": 1},
+                },
+                "logicalLocations": [{"fullyQualifiedName": loc_text}],
             }],
         }
+        if f.get("id"):
+            # Lets consumers recognise the same finding across runs.
+            result["partialFingerprints"] = {"netscopeFindingId/v1": f["id"]}
         results.append(result)
 
     doc = {
@@ -271,7 +307,7 @@ def from_tls(host, port, tls_findings):
         out.append(make_finding(
             "tls", t.get("severity", "medium"), t.get("title", "TLS issue"),
             host=host, port=port, detail=t.get("detail", ""),
-            evidence=t.get("evidence", ""), refs=t.get("refs", []),
+            evidence=t.get("evidence", ""), refs=t.get("refs", []), key=t.get("key"),
         ))
     return out
 
