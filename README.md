@@ -128,7 +128,7 @@ Discovers hosts, fingerprints each service for product/version, correlates
 against the offline CVE DB, audits TLS, runs the read-only weak-auth probes,
 and rolls it all into severity-scored findings with a **0-100 risk score** per
 host and overall. `--report` also writes the HTML report; `--export` emits
-`json`/`ndjson`/`csv`/`sarif`; `--save` records a snapshot for `diff`.
+`json`/`ndjson`/`csv`/`sarif`/`markdown`; `--save` records a snapshot for `diff`.
 
 ### `security` -- risky ports, or a deep audit
 
@@ -286,7 +286,8 @@ Each capability is a small, independently-usable module under `netscope/`:
 | `capture.py` | live capture / offline pcap replay + data collection |
 | `analysis.py` | passive threat detection (ARP/DHCP/scan/beacon/DNS-tunnel) |
 | `security.py` | risky-port checks + the deep audit pipeline |
-| `findings.py` | unified findings model, risk scoring, JSON/CSV/SARIF export |
+| `findings.py` | unified findings model, risk scoring, JSON/CSV/SARIF/Markdown export |
+| `remediation.py` | static "how do I fix it" advice attached to every finding |
 | `storage.py` | SQLite device/port history + audit snapshots for diffing |
 | `monitor.py` | continuous monitoring loop |
 | `report.py` | standalone HTML report generation |
@@ -299,7 +300,15 @@ curated list in `scripts/build_vulndb.py` -- edit it and re-run to regenerate
 
 ## Findings export & CI
 
-`audit`, `security --deep`, and `diff` accept `--export {json,ndjson,csv,sarif}`
+Every finding carries a `remediation` field -- static, per-category advice on
+what to do about it (renew the certificate, disable Telnet, set `requirepass`,
+...). It appears in the JSON/NDJSON/CSV/Markdown exports, in SARIF
+`properties.remediation`, and in the HTML report. It is not part of a finding's
+identity, so improving the wording never changes `diff` or suppression results.
+`--export markdown` renders a readable report grouped by host, with all
+network-derived text escaped so a hostile banner can't forge headings or links.
+
+`audit`, `security --deep`, and `diff` accept `--export {json,ndjson,csv,sarif,markdown}`
 (with `--export-out FILE`). SARIF 2.1.0 output (validated against the
 official schema) can be uploaded to GitHub code scanning, so a scheduled
 `netscope audit --export sarif` becomes a network posture check in CI. Network

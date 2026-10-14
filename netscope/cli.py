@@ -706,7 +706,7 @@ def _add_db(p):
 
 
 def _add_export(p):
-    p.add_argument("--export", choices=["json", "ndjson", "csv", "sarif"], default=None,
+    p.add_argument("--export", choices=["json", "ndjson", "csv", "sarif", "markdown"], default=None,
                    help="Export findings in a machine-readable format")
     p.add_argument("--export-out", default=None, dest="export_out",
                    help="Write the export to this file (default: stdout)")
