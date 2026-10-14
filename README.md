@@ -125,8 +125,10 @@ netscope security --host 192.168.1.1 --deep           # + CVE / TLS / weak-auth
 sudo netscope security --deep --save --export csv     # audit whole LAN, export
 ```
 
-Without `--deep` it's the original fast risky-port sweep. `--deep` promotes it
-to the full finding-producing audit (same engine as `audit`).
+Without `--deep` it's the original fast risky-port sweep: it flags ports with a
+known security history (Telnet, exposed Redis/Mongo, RDP, etc.) with a short
+explanation of why each matters, and `--save` records the results. `--deep`
+promotes it to the full finding-producing audit (same engine as `audit`).
 
 ### `tls` -- inspect a TLS service
 
@@ -210,17 +212,6 @@ compared once they have been recorded at least once. `--scan-ports` checks the
 same ~40 common ports as `portscan`'s default -- a listener on an arbitrary high
 port won't be noticed. A transient error mid-run is logged and retried on the
 next round instead of ending the monitor.
-
-### `security` -- sweep for risky exposed ports
-
-```bash
-sudo netscope security                        # discover + scan every host
-netscope security --host 192.168.1.1          # one host, no root
-sudo netscope security --save                 # record results
-```
-
-Flags ports with a known security history (Telnet, exposed Redis/Mongo, RDP,
-etc.) with a short explanation of why each matters.
 
 ### `report` -- generate an HTML report
 

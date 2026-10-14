@@ -48,6 +48,7 @@ def deep_check_host(host: str, ports=None, timing=None, do_tls=True, do_probes=T
     open_ports = portscan.scan(host, ports=ports, timing=timing)
     all_findings = []
     services = []
+    warnings = []   # checks that errored out -- surfaced so failure never looks like "clean"
 
     # 1) Port-number heuristics (kept -- cheap and still useful).
     all_findings += fmod.from_risky_ports(host, open_ports, RISKY_PORTS)
@@ -79,20 +80,20 @@ def deep_check_host(host: str, ports=None, timing=None, do_tls=True, do_probes=T
                 tls = tlsaudit.inspect(host, port)
                 if tls.get("ok"):
                     all_findings += fmod.from_tls(host, port, tls.get("findings", []))
-            except Exception:
-                pass
+            except Exception as e:
+                warnings.append(f"TLS audit of {host}:{port} failed: {e}")
 
     # 4) Read-only weak/default-auth probes (SNMP handled separately since it's UDP).
     if do_probes:
         try:
             all_findings += fmod.from_probes(probes.run_all(host, open_ports))
-        except Exception:
-            pass
+        except Exception as e:
+            warnings.append(f"weak-auth probes on {host} failed: {e}")
         try:
             snmp = probes.check_snmp_default_community(host)
             all_findings += fmod.from_probes(snmp)
-        except Exception:
-            pass
+        except Exception as e:
+            warnings.append(f"SNMP check on {host} failed: {e}")
 
     all_findings = fmod.dedupe(all_findings)
     return {
@@ -101,6 +102,7 @@ def deep_check_host(host: str, ports=None, timing=None, do_tls=True, do_probes=T
         "services": services,
         "findings": fmod.sort_findings(all_findings),
         "risk_score": fmod.risk_score(all_findings),
+        "warnings": warnings,
     }
 
 
@@ -150,6 +152,9 @@ def summarize_deep(deep_results):
             port = f":{f['port']}" if f.get("port") else ""
             refs = f"  {', '.join(f['refs'])}" if f.get("refs") else ""
             lines.append(f"  [{f['severity'].upper():8}] {f['title']}{port}{refs}")
+    for r in deep_results:
+        for w in r.get("warnings", []):
+            lines.append(f"\n[warn] {w}")
     if len(lines) == 1:
         lines.append("\nNo findings -- nothing risky surfaced in this audit.")
     return "\n".join(lines)
