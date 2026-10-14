@@ -238,6 +238,12 @@ def to_sarif(findings, tool_version=None):
                 "logicalLocations": [{"fullyQualifiedName": loc_text}],
             }],
         }
+        if f.get("suppression"):
+            # Accepted risk: keep it visible to consumers but marked as dismissed.
+            result["suppressions"] = [{
+                "kind": "external", "status": "accepted",
+                "justification": f["suppression"].get("reason") or "accepted risk",
+            }]
         if f.get("id"):
             # Lets consumers recognise the same finding across runs.
             result["partialFingerprints"] = {"netscopeFindingId/v1": f["id"]}

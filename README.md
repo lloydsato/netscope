@@ -267,7 +267,8 @@ Most commands accept `--json` for structured output you can pipe elsewhere
 all progress and summary text goes to stderr. Empty results are still valid
 documents (`[]`, or an object with empty lists). `--json` and a stdout `--export`
 can't be combined (use `--export-out FILE`). Exit codes: `0` ok, `1` runtime
-error (printed as `Error: ...`), `2` bad arguments, `130` interrupted.
+error (printed as `Error: ...`), `2` bad arguments (including a malformed
+`--ignore-file`), `3` a `--fail-on` threshold was met, `130` interrupted.
 
 ## Project layout
 
@@ -287,6 +288,7 @@ Each capability is a small, independently-usable module under `netscope/`:
 | `analysis.py` | passive threat detection (ARP/DHCP/scan/beacon/DNS-tunnel) |
 | `security.py` | risky-port checks + the deep audit pipeline |
 | `findings.py` | unified findings model, risk scoring, JSON/CSV/SARIF/Markdown export |
+| `suppress.py` | accepted-risk rules + `--fail-on` severity gate |
 | `remediation.py` | static "how do I fix it" advice attached to every finding |
 | `storage.py` | SQLite device/port history + audit snapshots for diffing |
 | `monitor.py` | continuous monitoring loop |
@@ -297,6 +299,39 @@ Each capability is a small, independently-usable module under `netscope/`:
 dicts/sets you can extend. The bundled CVE snapshot is generated from the
 curated list in `scripts/build_vulndb.py` -- edit it and re-run to regenerate
 `netscope/data/vulns.json.gz`.
+
+## Accepted risk & CI gating
+
+`audit`, `security` and `diff` take two workflow flags:
+
+```bash
+netscope audit --ignore-file accepted.txt --fail-on high      # exit 3 if an active high/critical remains
+netscope diff --fail-on high                                  # gate on *new* findings since the last snapshot
+```
+
+`--ignore-file` lists findings you have reviewed and accepted -- one rule per
+line (`#` starts the reason), or JSON:
+
+```text
+a1b2c3d4e5f6            expires=2026-12-31   # lab router, replacing in Q4
+tls:10.0.0.*:443                             # category:host:port ('*' = any, globs allowed)
+```
+
+```json
+[{"id": "a1b2c3d4e5f6", "reason": "lab router", "expires": "2026-12-31"},
+ {"category": "tls", "host": "10.0.0.*", "reason": "internal CA pending"}]
+```
+
+Finding ids are printed in `--export json/ndjson/sarif` output. Suppression is
+never silent: suppressed findings are listed with their reason after each run,
+are left out of the risk score, the saved snapshot and non-SARIF exports, but
+**stay in SARIF output marked `suppressions: accepted`** so code scanning shows them as
+dismissed rather than losing them. A rule needs at least one selector (no
+catch-all), an `expires` date stops it applying (with a warning) so exceptions
+get revisited, and a malformed file is rejected with exit 2 *before* anything is
+scanned. `--fail-on LEVEL` exits `3` if any *active* finding is at or above
+`LEVEL`, so CI can fail the build; with `diff` it considers only newly-added
+findings.
 
 ## Findings export & CI
 

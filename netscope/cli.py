@@ -23,7 +23,7 @@ import sqlite3
 import sys
 
 from . import __version__
-from . import discovery, portscan, fingerprint, oui, security, storage, report, nameservices
+from . import discovery, portscan, fingerprint, oui, security, storage, report, nameservices, suppress
 from . import capture as capture_mod
 from . import monitor as monitor_mod
 from . import tlsaudit, probes, findings as fmod
@@ -132,11 +132,16 @@ def _port_spec_arg(value):
         raise argparse.ArgumentTypeError(str(e)) from None
 
 
-def emit_findings_export(findings, fmt, out_path, meta=None):
-    """Render findings in `fmt` and write to `out_path` (or stdout if None)."""
+def emit_findings_export(findings, fmt, out_path, meta=None, suppressed=None):
+    """Render findings in `fmt` and write to `out_path` (or stdout if None).
+
+    SARIF additionally carries ``suppressed`` findings (marked as accepted) so
+    code-scanning shows them as dismissed instead of losing them; the other
+    formats list only the active findings.
+    """
     if not fmt:
         return
-    text = fmod.export(findings, fmt, meta=meta)
+    text = fmod.export(findings + (suppressed or []) if fmt == "sarif" else findings, fmt, meta=meta)
     if out_path:
         with open(out_path, "w", encoding="utf-8") as f:
             f.write(text)
@@ -175,6 +180,44 @@ def enrich_devices(hosts, do_fingerprint=False):
             "open_ports": scan_res, "os_guess": os_guess,
         })
     return devices
+
+
+# ---------- accepted-risk suppression + severity gate ----------
+
+EXIT_GATE = 3      # --fail-on threshold met by an active finding
+
+
+def _load_rules(args):
+    """Load --ignore-file up front, so a typo fails before a long audit runs."""
+    path = getattr(args, "ignore_file", None)
+    return suppress.load_rules(path) if path else []
+
+
+def _apply_rules(args, rules, findings):
+    """Split findings into (active, suppressed), reporting -- never hiding -- what was suppressed."""
+    if not rules:
+        return findings, []
+    active, suppressed, expired = suppress.apply_suppressions(findings, rules)
+    for r in expired:
+        print(f"Warning: suppression {r['where']} expired on {r['expires']}; it no longer applies.",
+              file=sys.stderr)
+    if suppressed:
+        print(f"\nSuppressed {len(suppressed)} finding(s) as accepted risk ({args.ignore_file}):")
+        for f in fmod.sort_findings(suppressed):
+            port = f":{f['port']}" if f.get("port") else ""
+            why = f["suppression"]["reason"] or "no reason given"
+            print(f"  [{(f.get('severity') or '').upper():8}] {f.get('host')}{port}  {f.get('title')}  -- {why}")
+    return active, suppressed
+
+
+def _gate_code(args, active):
+    """0, or EXIT_GATE when an active finding meets --fail-on."""
+    level = getattr(args, "fail_on", None)
+    if suppress.exceeds(active, level):
+        n = sum(1 for f in active if fmod.severity_rank(f) <= fmod.SEVERITIES.index(level))
+        print(f"\nFAIL: {n} active finding(s) at or above '{level}' (--fail-on {level}).", file=sys.stderr)
+        return EXIT_GATE
+    return 0
 
 
 # ---------- commands ----------
@@ -354,6 +397,7 @@ def _no_hosts_output(args, subnet, deep):
 
 
 def cmd_security(args):
+    rules = _load_rules(args)
     subnet = None
     if args.host:
         hosts = [{"ip": args.host}]
@@ -382,8 +426,10 @@ def cmd_security(args):
         return 1
 
     if args.deep:
-        print(security.summarize_deep(results))
         all_findings = security.collect_findings(results)
+        all_findings, suppressed = _apply_rules(args, rules, all_findings)
+        suppress.apply_to_results(results, {f["id"] for f in all_findings})
+        print(security.summarize_deep(results))
         if args.save:
             conn = storage.connect(args.db)
             storage.upsert_devices(conn, hosts)
@@ -397,10 +443,10 @@ def cmd_security(args):
             conn.close()
             print(f"\nSaved audit snapshot #{sid} ({len(all_findings)} findings) to history.")
         emit_findings_export(all_findings, args.export, args.export_out,
-                             meta={"subnet": subnet, "hosts": len(results)})
+                             meta={"subnet": subnet, "hosts": len(results)}, suppressed=suppressed)
         if args.json:
             machine_out(json.dumps(results, indent=2, default=str))
-        return 0
+        return _gate_code(args, all_findings)
 
     # quick (port-heuristic) mode
     print(security.summarize(results))
@@ -411,15 +457,18 @@ def cmd_security(args):
             storage.record_ports(conn, _identity_for(r["host"], hosts), r["open_ports"])
         conn.close()
         print("\nSaved scan results to history.")
-    if args.export:
-        quick_findings = []
+    quick_findings, quick_suppressed = [], []
+    if args.export or rules or args.fail_on:
         for r in results:
             quick_findings += fmod.from_risky_ports(r["host"], r["open_ports"], RISKY_PORTS)
+        quick_findings, quick_suppressed = _apply_rules(args, rules, quick_findings)
+    if args.export:
         emit_findings_export(quick_findings, args.export, args.export_out,
-                             meta={"subnet": subnet, "hosts": len(results), "mode": "quick"})
+                             meta={"subnet": subnet, "hosts": len(results), "mode": "quick"},
+                             suppressed=quick_suppressed)
     if args.json:
         machine_out(json.dumps(results, indent=2))
-    return 0
+    return _gate_code(args, quick_findings)
 
 
 def cmd_report(args):
@@ -469,6 +518,7 @@ def cmd_report(args):
 
 def cmd_audit(args):
     """Flagship: discover -> deep audit -> scored findings -> report/export."""
+    rules = _load_rules(args)
     if args.host:
         hosts = [{"ip": args.host}]
         subnet = args.host
@@ -510,6 +560,8 @@ def cmd_audit(args):
         except RuntimeError as e:
             print(f"(skipping capture: {e})", file=sys.stderr)
 
+    all_findings, suppressed = _apply_rules(args, rules, all_findings)
+    suppress.apply_to_results(results, {f["id"] for f in all_findings})
     print(security.summarize_deep(results))
     counts = fmod.severity_counts(all_findings)
     print(f"\nOverall risk score: {fmod.risk_score(all_findings)}/100  "
@@ -542,13 +594,15 @@ def cmd_audit(args):
 
     emit_findings_export(all_findings, args.export, args.export_out,
                          meta={"subnet": subnet, "hosts": len(results),
-                               "risk_score": fmod.risk_score(all_findings)})
+                               "risk_score": fmod.risk_score(all_findings)},
+                         suppressed=suppressed)
     if args.json:
         machine_out(json.dumps({"subnet": subnet, "results": results,
-                                "risk_score": fmod.risk_score(all_findings)}, indent=2, default=str))
+                                "risk_score": fmod.risk_score(all_findings),
+                                "suppressed": len(suppressed)}, indent=2, default=str))
     if conn:
         conn.close()
-    return 0
+    return _gate_code(args, all_findings)
 
 
 def _print_diff(diff):
@@ -570,6 +624,7 @@ def _print_diff(diff):
 
 
 def cmd_diff(args):
+    rules = _load_rules(args)
     if (args.old is None) != (args.new is None):
         print("Error: --old and --new must be given together (or neither, to compare "
               "the newest snapshot with the one before it).", file=sys.stderr)
@@ -603,13 +658,15 @@ def cmd_diff(args):
             print(f"(note: these snapshots are for different targets: "
                   f"{old_row['subnet']} vs {new_row['subnet']})")
         diff = storage.diff_scans(conn, old_id, new_id)
+        diff["added"], suppressed = _apply_rules(args, rules, diff["added"])
         _print_diff(diff)
         if args.export:
             emit_findings_export(diff["added"], args.export, args.export_out,
-                                 meta={"diff": f"{old_id}->{new_id}", "kind": "added"})
+                                 meta={"diff": f"{old_id}->{new_id}", "kind": "added"},
+                                 suppressed=suppressed)
         if args.json:
             machine_out(json.dumps(diff, indent=2, default=str))
-        return 0
+        return _gate_code(args, diff["added"])      # gate on *new* findings: the regression signal
     finally:
         conn.close()
 
@@ -712,6 +769,13 @@ def _add_export(p):
                    help="Write the export to this file (default: stdout)")
 
 
+def _add_gate(p):
+    p.add_argument("--ignore-file", default=None, dest="ignore_file", metavar="FILE",
+                   help="Accepted-risk file: findings it matches are reported as suppressed, not active")
+    p.add_argument("--fail-on", choices=["critical", "high", "medium", "low"], default=None,
+                   dest="fail_on", help=f"Exit {EXIT_GATE} if any active finding is at/above this severity")
+
+
 def build_parser():
     p = argparse.ArgumentParser(prog="netscope", description=__doc__.split("\n\n")[0])
     p.add_argument("--version", action="version", version=f"netscope {__version__}")
@@ -781,6 +845,7 @@ def build_parser():
     s.add_argument("--save", action="store_true", help="Save results to history")
     s.add_argument("--json", action="store_true")
     _add_export(s)
+    _add_gate(s)
     _add_db(s)
     s.set_defaults(func=cmd_security)
 
@@ -803,6 +868,7 @@ def build_parser():
                    help="After saving, show what changed vs the previous snapshot")
     a.add_argument("--json", action="store_true")
     _add_export(a)
+    _add_gate(a)
     _add_db(a)
     a.set_defaults(func=cmd_audit)
 
@@ -813,6 +879,7 @@ def build_parser():
                     help="New snapshot id (use with --old; default: newest)")
     df.add_argument("--json", action="store_true")
     _add_export(df)
+    _add_gate(df)
     _add_db(df)
     df.set_defaults(func=cmd_diff)
 
@@ -877,6 +944,9 @@ def main(argv=None):
         except (OSError, ValueError):
             pass
         return 0
+    except suppress.SuppressionError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 2
     except RuntimeError as e:
         print(f"Error: {e}", file=sys.stderr)
         return 1
