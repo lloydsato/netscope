@@ -124,6 +124,15 @@ class ApplyTests(unittest.TestCase):
         self.assertFalse(S.exceeds(self.fs, None))
 
 
+class IdDiscoverabilityTests(unittest.TestCase):
+    def test_ids_appear_in_every_human_export_so_rules_can_be_written(self):
+        f = fnd()
+        self.assertIn(f["id"], F.export([f], "csv"))
+        self.assertIn(f["id"], F.export([f], "markdown"))
+        self.assertIn(f["id"], F.export([f], "json"))
+        self.assertIn(f["id"], F.export([f], "ndjson"))
+
+
 class SarifSuppressionTests(unittest.TestCase):
     def test_suppressed_results_are_marked_not_dropped(self):
         a, b = fnd(title="A"), fnd(title="B", port=80)

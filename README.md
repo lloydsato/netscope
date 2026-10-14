@@ -322,7 +322,7 @@ tls:10.0.0.*:443                             # category:host:port ('*' = any, gl
  {"category": "tls", "host": "10.0.0.*", "reason": "internal CA pending"}]
 ```
 
-Finding ids are printed in `--export json/ndjson/sarif` output. Suppression is
+Each finding's id is in the JSON, NDJSON, CSV and Markdown exports (and SARIF `partialFingerprints`). Suppression is
 never silent: suppressed findings are listed with their reason after each run,
 are left out of the risk score, the saved snapshot and non-SARIF exports, but
 **stay in SARIF output marked `suppressions: accepted`** so code scanning shows them as

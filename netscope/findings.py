@@ -156,7 +156,7 @@ def to_ndjson(findings):
     return "".join(json.dumps(f, default=str) + "\n" for f in sort_findings(findings))
 
 
-_CSV_COLUMNS = ["severity", "category", "host", "port", "title", "detail", "refs", "cvss", "remediation"]
+_CSV_COLUMNS = ["severity", "category", "host", "port", "title", "detail", "refs", "cvss", "remediation", "id"]
 
 
 def to_csv(findings):
@@ -169,7 +169,7 @@ def to_csv(findings):
             f.get("port", "") if f.get("port") is not None else "",
             f.get("title", ""), f.get("detail", ""),
             ";".join(f.get("refs", [])), f.get("cvss", "") if f.get("cvss") is not None else "",
-            f.get("remediation", ""),
+            f.get("remediation", ""), f.get("id", ""),
         ])
     return buf.getvalue()
 
@@ -297,6 +297,7 @@ def to_markdown(findings, meta=None):
             lines.append("")
             if f.get("detail"):
                 lines += [_md(f["detail"]), ""]
+            lines += [f"- **ID:** `{f['id']}`"] if f.get("id") else []
             if f.get("evidence"):
                 lines += [f"- **Evidence:** {_md(f['evidence'])}"]
             if f.get("cvss") is not None:
