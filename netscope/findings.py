@@ -326,6 +326,32 @@ def from_probes(probe_findings):
     return out
 
 
+def from_nameservices(host, exposures, hostname=""):
+    """Name-service exposures found by nameservices.discover_names -> findings."""
+    out = []
+    who = f" ({hostname})" if hostname else ""
+    if "ssdp" in exposures:
+        out.append(make_finding(
+            "name-service", "medium", "UPnP/SSDP service advertised",
+            host=host, port=1900,
+            detail=(f"{host}{who} answers SSDP discovery. UPnP devices can expose port-mapping "
+                    "and control interfaces with no authentication, and are a common vector for "
+                    "exposing LAN services to the internet."),
+            evidence="SSDP M-SEARCH response",
+            refs=["https://www.cisa.gov/news-events/alerts/2013/01/29/security-flaws-universal-plug-and-play-unplug-dont-play"],
+        ))
+    if "netbios" in exposures:
+        out.append(make_finding(
+            "name-service", "low", "NetBIOS name service responding",
+            host=host, port=137,
+            detail=(f"{host}{who} answers NetBIOS node-status queries, disclosing its machine "
+                    "and workgroup names to anyone on the LAN. Legacy NetBIOS/LLMNR name "
+                    "resolution can also be abused for name-poisoning (spoofing) attacks."),
+            evidence="NBSTAT response on udp/137",
+        ))
+    return out
+
+
 def from_capture_alerts(alerts):
     """capture summary 'alerts' (list of (severity, message)) -> findings."""
     out = []

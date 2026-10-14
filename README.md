@@ -82,11 +82,24 @@ Built for security researchers and network auditors, all offline:
 sudo netscope discover
 netscope discover --method sweep              # no root, less reliable
 sudo netscope discover --fingerprint          # add banner grab + OS guess
+sudo netscope discover --names                # add hostname/model via mDNS, SSDP, NetBIOS
 sudo netscope discover --save                 # record to history
 ```
 
 Shows IP, MAC, and vendor for every device. ARP-based by default (needs root),
 falls back to a TCP ping sweep.
+
+`--names` adds a hostname and device model by asking the LAN directly (read-only,
+stdlib UDP, no root needed for this step): **mDNS** (self-announced `.local`
+names and service types), **SSDP/UPnP** (`friendlyName` / `modelName` /
+`manufacturer` from the device's description document) and **NetBIOS** node
+status (machine + workgroup name). Everything off the wire is untrusted: names are
+sanitised, UPnP descriptions are only fetched from the host that announced them
+and are never run through an XML parser, and results for IPs outside the audited
+set are discarded. `audit` does this by default on subnet audits (`--no-names` to
+skip; not run for `--host`), and turns exposed UPnP/SSDP (medium) and NetBIOS
+(low) into findings. Hostnames are saved with `--save` and shown in `history`
+and the HTML report.
 
 ### `portscan` -- check a host's open ports
 
@@ -264,6 +277,7 @@ Each capability is a small, independently-usable module under `netscope/`:
 |---|---|
 | `discovery.py` | ARP scan + ping-sweep host discovery |
 | `oui.py` | MAC to vendor lookup (bundled IEEE data) |
+| `nameservices.py` | hostname/model discovery via mDNS, SSDP/UPnP, NetBIOS |
 | `portscan.py` | threaded TCP connect + UDP scanning, timing templates |
 | `fingerprint.py` | banner grabbing + product/version + OS inference |
 | `vulndb.py` | offline CVE correlation (bundled `data/vulns.json.gz`) |

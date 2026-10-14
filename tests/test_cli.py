@@ -13,9 +13,22 @@ import tempfile
 import unittest
 from unittest import mock
 
-from netscope import cli, storage, findings as F, security, discovery
+from netscope import cli, storage, findings as F, security, discovery, nameservices
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+_name_patch = None
+
+
+def setUpModule():
+    # Name discovery does real multicast/UDP I/O; keep in-process CLI tests off the network.
+    global _name_patch
+    _name_patch = mock.patch.object(nameservices, "discover_names", return_value={})
+    _name_patch.start()
+
+
+def tearDownModule():
+    _name_patch.stop()
 
 
 def run_main(*argv):
@@ -266,6 +279,61 @@ class DiscoverCommandTests(unittest.TestCase):
         with mock.patch.object(discovery, "discover", side_effect=RuntimeError("needs root")):
             code, _, err = run_main("discover")
         self.assertEqual((code, "needs root" in err), (1, True))
+
+
+class NameDiscoveryCommandTests(unittest.TestCase):
+    HOSTS = [{"ip": "10.0.0.7", "mac": "00:50:56:00:00:07"}, {"ip": "10.0.0.8", "mac": "00:50:56:00:00:08"}]
+    NAMES = {"10.0.0.7": {"hostname": "den", "model": "Boom 3", "manufacturer": "Acme", "workgroup": "",
+                          "services": [], "exposures": ["ssdp"]},
+             "10.0.0.8": {"hostname": "", "model": "", "manufacturer": "", "workgroup": "WG",
+                          "services": [], "exposures": ["netbios"]}}
+
+    def hosts(self):
+        return [dict(h) for h in self.HOSTS]
+
+    def test_discover_names_adds_columns_and_json_fields(self):
+        with mock.patch.object(discovery, "discover", return_value=("10.0.0.0/24", self.hosts(), "arp")), \
+                mock.patch.object(nameservices, "discover_names", return_value=self.NAMES):
+            code, out, _ = run_main("discover", "--names")
+            self.assertEqual(code, 0)
+            self.assertIn("NAME", out)
+            self.assertIn("Boom 3", out)
+            code, out, _ = run_main("discover", "--names", "--json")
+        hosts = json.loads(out)["hosts"]
+        self.assertEqual(hosts[0]["hostname"], "den")
+        self.assertEqual(hosts[0]["exposures"], ["ssdp"])
+
+    def test_discover_without_names_does_not_touch_the_network(self):
+        with mock.patch.object(discovery, "discover", return_value=("10.0.0.0/24", self.hosts(), "arp")), \
+                mock.patch.object(nameservices, "discover_names") as dn:
+            run_main("discover")
+        dn.assert_not_called()
+
+    def test_discover_save_stores_the_hostname(self):
+        db = os.path.join(tempfile.mkdtemp(), "n.db")
+        with mock.patch.object(discovery, "discover", return_value=("10.0.0.0/24", self.hosts(), "arp")), \
+                mock.patch.object(nameservices, "discover_names", return_value=self.NAMES):
+            run_main("discover", "--names", "--save", "--db", db)
+        code, out, _ = run_main("history", "--db", db)
+        self.assertIn("den", out)
+
+    def test_audit_turns_exposures_into_findings(self):
+        with mock.patch.object(discovery, "discover", return_value=("10.0.0.0/24", self.hosts(), "arp")), \
+                mock.patch.object(nameservices, "discover_names", return_value=self.NAMES), \
+                mock.patch.object(security, "deep_check_hosts",
+                                  return_value=[canned_result("10.0.0.7", []), canned_result("10.0.0.8", [])]):
+            code, out, _ = run_main("audit", "--export", "csv")
+        self.assertEqual(code, 0)
+        self.assertIn("UPnP/SSDP service advertised", out)
+        self.assertIn("NetBIOS name service responding", out)
+
+    def test_audit_no_names_and_host_mode_skip_lan_queries(self):
+        with mock.patch.object(discovery, "discover", return_value=("10.0.0.0/24", self.hosts(), "arp")), \
+                mock.patch.object(nameservices, "discover_names") as dn, \
+                mock.patch.object(security, "deep_check_hosts", return_value=[canned_result("10.0.0.7", [])]):
+            run_main("audit", "--no-names")
+            run_main("audit", "--host", "10.0.0.7")
+        dn.assert_not_called()
 
 
 class ErrorHandlingTests(unittest.TestCase):

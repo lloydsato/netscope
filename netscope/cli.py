@@ -23,7 +23,7 @@ import sqlite3
 import sys
 
 from . import __version__
-from . import discovery, portscan, fingerprint, oui, security, storage, report
+from . import discovery, portscan, fingerprint, oui, security, storage, report, nameservices
 from . import capture as capture_mod
 from . import monitor as monitor_mod
 from . import tlsaudit, probes, findings as fmod
@@ -171,6 +171,7 @@ def enrich_devices(hosts, do_fingerprint=False):
             os_guess = fp["os_guess"]
         devices.append({
             "ip": ip, "mac": h.get("mac"), "vendor": h.get("vendor", "unknown"),
+            "hostname": h.get("hostname"), "model": h.get("model"),
             "open_ports": scan_res, "os_guess": os_guess,
         })
     return devices
@@ -186,6 +187,8 @@ def cmd_discover(args):
         return 1
 
     oui.enrich_hosts(hosts)
+    if args.names and hosts:
+        nameservices.enrich_hosts(hosts)
     print(f"Subnet: {subnet}  (method: {method_used})")
     if not hosts:
         print("No hosts found.")
@@ -201,10 +204,13 @@ def cmd_discover(args):
             fp = fingerprint.fingerprint_host(h["ip"], open_ports)
             fp_map[h["ip"]] = fp["os_guess"]
 
-    headers = ["IP", "MAC", "VENDOR"] + (["OS GUESS"] if args.fingerprint else [])
+    headers = (["IP", "MAC", "VENDOR"] + (["NAME", "MODEL"] if args.names else [])
+               + (["OS GUESS"] if args.fingerprint else []))
     rows = []
     for h in hosts:
         row = [h["ip"], h.get("mac") or "-", h.get("vendor", "unknown")]
+        if args.names:
+            row += [h.get("hostname") or "-", h.get("model") or "-"]
         if args.fingerprint:
             row.append(fp_map.get(h["ip"]) or "-")
         rows.append(row)
@@ -480,12 +486,18 @@ def cmd_audit(args):
         _no_hosts_output(args, subnet, True)
         return 0
 
+    name_findings = []
+    if not args.no_names and not args.host:      # --host is a targeted, quick audit: no LAN-wide queries
+        nameservices.enrich_hosts(hosts)
+        for h in hosts:
+            name_findings += fmod.from_nameservices(h["ip"], h.get("exposures", []), h.get("hostname", ""))
+
     try:
         results = security.deep_check_hosts(hosts, timing=args.timing)
     except RuntimeError as e:
         print(f"Error: {e}", file=sys.stderr)
         return 1
-    all_findings = security.collect_findings(results)
+    all_findings = fmod.sort_findings(fmod.dedupe(security.collect_findings(results) + name_findings))
 
     cap = None
     if args.capture_seconds > 0:
@@ -676,8 +688,9 @@ def cmd_history(args):
                 print("No devices recorded yet. Run 'netscope discover --save' first.")
             else:
                 rows = [[d["ip"], d["mac"] or "-", (d["vendor"] or "unknown")[:28],
+                         (d.get("hostname") or "-")[:28],
                          d["first_seen_h"], d["last_seen_h"]] for d in devices]
-                print(fmt_table(rows, ["IP", "MAC", "VENDOR", "FIRST SEEN", "LAST SEEN"]))
+                print(fmt_table(rows, ["IP", "MAC", "VENDOR", "NAME", "FIRST SEEN", "LAST SEEN"]))
             payload = devices
         if args.json:
             machine_out(json.dumps(payload, indent=2))
@@ -708,6 +721,8 @@ def build_parser():
     d.add_argument("--subnet", default=None, help=f"CIDR, e.g. 192.168.1.0/24 (default: auto, now {get_default_subnet() or 'unknown'})")
     d.add_argument("--method", choices=["auto", "arp", "sweep"], default="auto")
     d.add_argument("--fingerprint", action="store_true", help="Also grab banners and guess each device's OS")
+    d.add_argument("--names", action="store_true",
+                   help="Also resolve hostnames/models via mDNS, SSDP/UPnP and NetBIOS")
     d.add_argument("--save", action="store_true", help="Save discovered devices to history")
     d.add_argument("--json", action="store_true")
     _add_db(d)
@@ -778,6 +793,8 @@ def build_parser():
                    help="Also capture N seconds of traffic for the threat feed (needs root)")
     a.add_argument("--gateway", default=None)
     a.add_argument("--iface", default=None)
+    a.add_argument("--no-names", action="store_true", dest="no_names",
+                   help="Skip mDNS/SSDP/NetBIOS name discovery (on by default for subnet audits)")
     a.add_argument("--report", default=None, metavar="FILE.html",
                    help="Also write a standalone HTML report")
     a.add_argument("--label", default=None, help="Label for the saved snapshot")

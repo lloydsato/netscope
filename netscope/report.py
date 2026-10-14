@@ -40,6 +40,7 @@ def _device_row(d):
     vendor = d.get("vendor") or "unknown"
     mac = d.get("mac") or "\u2014"
     hostname = d.get("hostname") or ""
+    model = d.get("model") or ""
     name_bits = f'<span class="host-ip">{_esc(d.get("ip"))}</span>'
     if hostname:
         name_bits += f'<span class="host-name">{_esc(hostname)}</span>'
@@ -47,7 +48,7 @@ def _device_row(d):
       <tr>
         <td class="mono">{name_bits}</td>
         <td class="mono muted">{_esc(mac)}</td>
-        <td>{_esc(vendor)}{f'<span class="os-tag">{_esc(os_guess)}</span>' if os_guess else ''}</td>
+        <td>{_esc(vendor)}{f'<span class="os-tag">{_esc(model)}</span>' if model else ''}{f'<span class="os-tag">{_esc(os_guess)}</span>' if os_guess else ''}</td>
         <td class="ports">{chips}</td>
       </tr>"""
 
