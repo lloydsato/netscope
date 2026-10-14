@@ -288,6 +288,7 @@ Each capability is a small, independently-usable module under `netscope/`:
 | `analysis.py` | passive threat detection (ARP/DHCP/scan/beacon/DNS-tunnel) |
 | `security.py` | risky-port checks + the deep audit pipeline |
 | `findings.py` | unified findings model, risk scoring, JSON/CSV/SARIF/Markdown export |
+| `config.py` | optional JSON config supplying default flag values |
 | `suppress.py` | accepted-risk rules + `--fail-on` severity gate |
 | `remediation.py` | static "how do I fix it" advice attached to every finding |
 | `storage.py` | SQLite device/port history + audit snapshots for diffing |
@@ -332,6 +333,33 @@ get revisited, and a malformed file is rejected with exit 2 *before* anything is
 scanned. `--fail-on LEVEL` exits `3` if any *active* finding is at or above
 `LEVEL`, so CI can fail the build; with `diff` it considers only newly-added
 findings.
+
+## Config file
+
+Defaults you'd otherwise retype can live in `~/.netscope/config.json`:
+
+```json
+{
+  "subnet": "192.168.1.0/24",
+  "timing": 2,
+  "db": "~/audits/home.db",
+  "ignore_file": "~/audits/accepted.txt",
+  "fail_on": "high",
+  "webhook": "https://ntfy.sh/my-lan"
+}
+```
+
+Supported keys: `subnet`, `method`, `timing`, `db`, `ignore_file`, `fail_on`,
+`webhook`, `gateway`, `iface`. A key only applies to commands that have the
+matching flag, and **a flag on the command line always wins**. Values are
+validated and unknown keys are rejected (so a typo can't silently drop a safety
+setting like `fail_on`); a bad config exits `2` before anything runs.
+
+For a config kept in a project or CI repo use `netscope --config path/to/file.json audit ...`
+(before the command) or `NETSCOPE_CONFIG=path`; an explicitly named file must exist.
+A `netscope.json` in the current directory is **deliberately not** loaded
+automatically: `ignore_file` and `webhook` change what an audit reports and where data
+goes, so simply running netscope inside an untrusted checkout must not reconfigure it.
 
 ## Findings export & CI
 

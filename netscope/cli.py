@@ -24,6 +24,7 @@ import sys
 
 from . import __version__
 from . import discovery, portscan, fingerprint, oui, security, storage, report, nameservices, suppress
+from . import config as config_mod
 from . import capture as capture_mod
 from . import monitor as monitor_mod
 from . import tlsaudit, probes, findings as fmod
@@ -776,9 +777,14 @@ def _add_gate(p):
                    dest="fail_on", help=f"Exit {EXIT_GATE} if any active finding is at/above this severity")
 
 
-def build_parser():
+def build_parser(config=None):
+    """Build the argument parser. ``config`` ({dest: value}, see netscope.config)
+    supplies per-user defaults; explicit command-line flags still win."""
     p = argparse.ArgumentParser(prog="netscope", description=__doc__.split("\n\n")[0])
     p.add_argument("--version", action="version", version=f"netscope {__version__}")
+    p.add_argument("--config", default=None, metavar="FILE",
+                   help="Settings file supplying default flag values (default: ~/.netscope/config.json; "
+                        f"or set ${config_mod.ENV_VAR}). Must come before the command.")
     sub = p.add_subparsers(dest="command", required=True)
 
     d = sub.add_parser("discover", help="Find devices on the local network")
@@ -911,6 +917,9 @@ def build_parser():
     _add_db(h)
     h.set_defaults(func=cmd_history)
 
+    for sp in sub.choices.values():
+        applicable = {a.dest for a in sp._actions}
+        sp.set_defaults(**{k: v for k, v in (config or {}).items() if k in applicable})
     return p
 
 
@@ -921,7 +930,15 @@ def _wants_machine_stdout(args):
 
 def main(argv=None):
     global _machine_stream
-    parser = build_parser()
+    # --config must be known before the real parser is built, since it supplies defaults.
+    pre = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
+    pre.add_argument("--config", default=None)
+    try:
+        cfg = config_mod.load(pre.parse_known_args(argv)[0].config)
+    except config_mod.ConfigError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 2
+    parser = build_parser(cfg)
     args = parser.parse_args(argv)
     if getattr(args, "json", False) and getattr(args, "export", None) and not getattr(args, "export_out", None):
         parser.error("--json and --export both write to stdout; add --export-out FILE "

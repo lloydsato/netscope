@@ -13,22 +13,27 @@ import tempfile
 import unittest
 from unittest import mock
 
-from netscope import cli, storage, findings as F, security, discovery, nameservices
+from netscope import cli, storage, findings as F, security, discovery, nameservices, config as config_mod
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-_name_patch = None
+_patches = []
 
 
 def setUpModule():
-    # Name discovery does real multicast/UDP I/O; keep in-process CLI tests off the network.
-    global _name_patch
-    _name_patch = mock.patch.object(nameservices, "discover_names", return_value={})
-    _name_patch.start()
+    # Name discovery does real multicast/UDP I/O; keep in-process CLI tests off the network,
+    # and off any real ~/.netscope/config.json / $NETSCOPE_CONFIG on the machine running them.
+    for p in (mock.patch.object(nameservices, "discover_names", return_value={}),
+              mock.patch.object(config_mod, "DEFAULT_PATH", None),
+              mock.patch.dict(os.environ, {}, clear=False)):
+        p.start()
+        _patches.append(p)
+    os.environ.pop(config_mod.ENV_VAR, None)
 
 
 def tearDownModule():
-    _name_patch.stop()
+    for p in reversed(_patches):
+        p.stop()
 
 
 def run_main(*argv):
