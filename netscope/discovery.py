@@ -79,6 +79,50 @@ def arp_scan(subnet: str, timeout: float = 2.0):
     return hosts
 
 
+def ndp_scan(iface: str = None, timeout: float = 3.0):
+    """Discover IPv6 neighbours on the local link -> list of {ip, mac}.
+
+    Sends an ICMPv6 echo request to the all-nodes multicast group (ff02::1) and
+    collects every reply (``multi=True``: many hosts answer one probe). Sweeping
+    a v6 prefix address-by-address is infeasible (a /64 is 2^64 addresses), so
+    multicast is the standard way to enumerate a link. Needs scapy + root, and
+    only finds hosts on the same link. Link-local replies (fe80::/10) get a
+    ``%iface`` zone so the address is directly usable by the scanners.
+    """
+    try:
+        from scapy.all import Ether, IPv6, ICMPv6EchoRequest, srp, conf
+    except ImportError as e:
+        raise RuntimeError(
+            "scapy is required for IPv6 neighbour discovery. Install with: pip install scapy"
+        ) from e
+
+    if is_root() is False:
+        raise RuntimeError(
+            "IPv6 neighbour discovery needs raw socket access. Re-run with sudo "
+            "(Linux/macOS) or as Administrator (Windows, with Npcap installed)."
+        )
+
+    iface = iface or str(getattr(conf, "iface", "") or "") or None
+    probe = Ether(dst="33:33:00:00:00:01") / IPv6(dst="ff02::1") / ICMPv6EchoRequest()
+    kwargs = {"timeout": timeout, "multi": True, "verbose": False}
+    if iface:
+        kwargs["iface"] = iface
+    answered = srp(probe, **kwargs)[0]
+
+    hosts, seen = [], set()
+    for _sent, rx in answered:
+        ip = str(rx[IPv6].src)
+        if ip in seen or ip == "::":
+            continue
+        seen.add(ip)
+        if iface and ipaddress.ip_address(ip).is_link_local:
+            ip = f"{ip}%{iface}"
+        hosts.append({"ip": ip, "mac": str(rx[Ether].src)})
+
+    hosts.sort(key=lambda h: (ipaddress.ip_address(h["ip"].split("%", 1)[0]), h["mac"]))
+    return hosts
+
+
 def ping_sweep(subnet: str, max_workers: int = 64, timeout: float = 0.5):
     """Fallback host discovery using TCP connect probes instead of ICMP/ARP.
 

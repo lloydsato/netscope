@@ -18,6 +18,7 @@ A ``Finding`` is a plain dict::
       "evidence": "the banner / cert line / cipher we observed",
       "refs":     ["CVE-2018-15473", "https://..."],
       "cvss":     7.5,                  # float or None
+      "remediation": "what to do",      # static advice; not part of the id
     }
 
 Exporters cover the formats auditors and CI actually consume: JSON, NDJSON,
@@ -32,6 +33,7 @@ import math
 import re
 
 from . import __version__
+from . import remediation as _remediation
 
 SEVERITIES = ("critical", "high", "medium", "low", "info")
 
@@ -48,7 +50,7 @@ _SARIF_LEVEL = {
 
 
 def make_finding(category, severity, title, host="", port=None, detail="",
-                 evidence="", refs=None, cvss=None, key=None):
+                 evidence="", refs=None, cvss=None, key=None, remediation=None):
     """Build a normalised finding dict with a stable, content-derived id.
 
     The id is derived from category/host/port/title plus ``key`` (default: the
@@ -56,6 +58,11 @@ def make_finding(category, severity, title, host="", port=None, detail="",
     contains values that change between runs (e.g. "expires in 12 days"), so
     the same underlying issue keeps one id and ``diff`` doesn't report it as a
     new finding every day.
+
+    ``remediation`` is advice for fixing it; when omitted, the default for the
+    category/title/port comes from :mod:`netscope.remediation`. It is
+    deliberately excluded from the id so improving the wording never makes
+    ``diff`` report every finding as new or un-suppresses accepted risks.
     """
     severity = severity if severity in _SEV_RANK else "info"
     refs = list(refs) if refs else []
@@ -72,6 +79,8 @@ def make_finding(category, severity, title, host="", port=None, detail="",
         "evidence": evidence,
         "refs": refs,
         "cvss": cvss,
+        "remediation": (_remediation.for_finding(category, title, port)
+                        if remediation is None else remediation),
     }
 
 
@@ -147,7 +156,7 @@ def to_ndjson(findings):
     return "".join(json.dumps(f, default=str) + "\n" for f in sort_findings(findings))
 
 
-_CSV_COLUMNS = ["severity", "category", "host", "port", "title", "detail", "refs", "cvss"]
+_CSV_COLUMNS = ["severity", "category", "host", "port", "title", "detail", "refs", "cvss", "remediation", "id"]
 
 
 def to_csv(findings):
@@ -160,6 +169,7 @@ def to_csv(findings):
             f.get("port", "") if f.get("port") is not None else "",
             f.get("title", ""), f.get("detail", ""),
             ";".join(f.get("refs", [])), f.get("cvss", "") if f.get("cvss") is not None else "",
+            f.get("remediation", ""), f.get("id", ""),
         ])
     return buf.getvalue()
 
@@ -218,6 +228,7 @@ def to_sarif(findings, tool_version=None):
                 "refs": f.get("refs", []),
                 "cvss": f.get("cvss"),
                 "evidence": f.get("evidence", ""),
+                "remediation": f.get("remediation", ""),
             },
             "locations": [{
                 "physicalLocation": {
@@ -227,6 +238,12 @@ def to_sarif(findings, tool_version=None):
                 "logicalLocations": [{"fullyQualifiedName": loc_text}],
             }],
         }
+        if f.get("suppression"):
+            # Accepted risk: keep it visible to consumers but marked as dismissed.
+            result["suppressions"] = [{
+                "kind": "external", "status": "accepted",
+                "justification": f["suppression"].get("reason") or "accepted risk",
+            }]
         if f.get("id"):
             # Lets consumers recognise the same finding across runs.
             result["partialFingerprints"] = {"netscopeFindingId/v1": f["id"]}
@@ -248,11 +265,57 @@ def to_sarif(findings, tool_version=None):
     return json.dumps(doc, indent=2, default=str)
 
 
+_MD_ESCAPE = re.compile(r"([\\`*_{}\[\]<>()#+!|~])")
+
+
+def _md(text):
+    """Make untrusted text (banners, hostnames, cert fields) inert in Markdown:
+    escape syntax characters and collapse newlines so it can't forge headings,
+    links or table rows."""
+    return _MD_ESCAPE.sub(r"\\\1", " ".join(str(text if text is not None else "").split()))
+
+
+def to_markdown(findings, meta=None):
+    """Human-readable Markdown report: summary, then findings grouped by host."""
+    findings = sort_findings(findings)
+    counts = severity_counts(findings)
+    meta = meta or {}
+    lines = ["# netscope findings", ""]
+    for key in ("subnet", "hosts", "risk_score"):
+        if meta.get(key) is not None:
+            lines.append(f"- **{key.replace('_', ' ').capitalize()}:** {_md(meta[key])}")
+    lines.append(f"- **Total findings:** {len(findings)}")
+    lines += ["", "| Severity | Count |", "|---|---|"]
+    lines += [f"| {sev} | {counts[sev]} |" for sev in SEVERITIES]
+    if not findings:
+        lines += ["", "No findings."]
+    for host, group in sorted(by_host(findings).items()):
+        lines += ["", f"## {_md(host)} (risk {risk_score(group)}/100)", ""]
+        for f in group:
+            port = f":{f['port']}" if f.get("port") else ""
+            lines.append(f"### [{f['severity'].upper()}] {_md(f.get('title'))}{_md(port)}")
+            lines.append("")
+            if f.get("detail"):
+                lines += [_md(f["detail"]), ""]
+            lines += [f"- **ID:** `{f['id']}`"] if f.get("id") else []
+            if f.get("evidence"):
+                lines += [f"- **Evidence:** {_md(f['evidence'])}"]
+            if f.get("cvss") is not None:
+                lines += [f"- **CVSS:** {_md(f['cvss'])}"]
+            if f.get("refs"):
+                lines += ["- **References:** " + ", ".join(_md(r) for r in f["refs"])]
+            if f.get("remediation"):
+                lines += [f"- **Remediation:** {f['remediation']}"]    # static text, not network data
+            lines.append("")
+    return re.sub(r"\n{3,}", "\n\n", "\n".join(lines)).rstrip("\n") + "\n"
+
+
 EXPORTERS = {
     "json": to_json,
     "ndjson": lambda findings, meta=None: to_ndjson(findings),
     "csv": lambda findings, meta=None: to_csv(findings),
     "sarif": lambda findings, meta=None: to_sarif(findings),
+    "markdown": to_markdown,
 }
 
 
@@ -322,6 +385,32 @@ def from_probes(probe_findings):
             host=p.get("host", ""), port=p.get("port"),
             detail=p.get("detail", ""), evidence=p.get("evidence", ""),
             refs=p.get("refs", []),
+        ))
+    return out
+
+
+def from_nameservices(host, exposures, hostname=""):
+    """Name-service exposures found by nameservices.discover_names -> findings."""
+    out = []
+    who = f" ({hostname})" if hostname else ""
+    if "ssdp" in exposures:
+        out.append(make_finding(
+            "name-service", "medium", "UPnP/SSDP service advertised",
+            host=host, port=1900,
+            detail=(f"{host}{who} answers SSDP discovery. UPnP devices can expose port-mapping "
+                    "and control interfaces with no authentication, and are a common vector for "
+                    "exposing LAN services to the internet."),
+            evidence="SSDP M-SEARCH response",
+            refs=["https://www.cisa.gov/news-events/alerts/2013/01/29/security-flaws-universal-plug-and-play-unplug-dont-play"],
+        ))
+    if "netbios" in exposures:
+        out.append(make_finding(
+            "name-service", "low", "NetBIOS name service responding",
+            host=host, port=137,
+            detail=(f"{host}{who} answers NetBIOS node-status queries, disclosing its machine "
+                    "and workgroup names to anyone on the LAN. Legacy NetBIOS/LLMNR name "
+                    "resolution can also be abused for name-poisoning (spoofing) attacks."),
+            evidence="NBSTAT response on udp/137",
         ))
     return out
 

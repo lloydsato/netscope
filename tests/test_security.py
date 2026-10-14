@@ -82,6 +82,11 @@ class DeepCheckTests(unittest.TestCase):
                 mock.patch.object(security.probes, "check_snmp_default_community", side_effect=ValueError("snmp boom")):
             res = security.deep_check_host("10.0.0.5")
         self.assertTrue([f for f in res["findings"] if f["category"] == "cve"])      # rest of audit survived
+        # ...but the failures are reported, not swallowed.
+        joined = " ".join(res["warnings"])
+        for needle in ("tls boom", "probe boom", "snmp boom"):
+            self.assertIn(needle, joined)
+        self.assertIn("[warn]", security.summarize_deep([res]))
 
     def test_findings_sorted_scored_and_deduped(self):
         probe = [{"category": "weak-auth", "severity": "critical", "title": "Unauthenticated Redis exposed",

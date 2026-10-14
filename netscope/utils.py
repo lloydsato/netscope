@@ -26,6 +26,25 @@ def get_default_subnet():
         return None
 
 
+def is_ipv6(host) -> bool:
+    """True for an IPv6 literal (a ``%zone`` suffix such as ``fe80::1%eth0`` is allowed)."""
+    try:
+        return ipaddress.ip_address(str(host).split("%", 1)[0]).version == 6
+    except ValueError:
+        return False
+
+
+def family_for(host) -> int:
+    """Socket address family for an already-resolved IP string."""
+    return socket.AF_INET6 if is_ipv6(host) else socket.AF_INET
+
+
+def host_header(host) -> str:
+    """Value for an HTTP ``Host:`` header: IPv6 literals need brackets."""
+    host = str(host)
+    return f"[{host}]" if is_ipv6(host) and not host.startswith("[") else host
+
+
 def is_root():
     try:
         return os.geteuid() == 0

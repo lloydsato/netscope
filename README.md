@@ -35,6 +35,19 @@ python3 -m netscope.cli <command> ...
 
 ---
 
+## What's new in 0.4
+
+- **Name & service discovery** -- `discover --names` / default in `audit`: hostnames,
+  models and UPnP/NetBIOS exposure via mDNS, SSDP and NetBIOS.
+- **Remediation + Markdown export** -- every finding says how to fix it;
+  `--export markdown` and finding ids in every export.
+- **Accepted risk & CI gating** -- `--ignore-file` (with expiry) and `--fail-on`
+  (exit 3) on `audit` / `security` / `diff`.
+- **Config file** -- `~/.netscope/config.json` / `--config` for default flags.
+- **IPv6 reach** -- scan/audit IPv6 targets; `discover --ipv6` for link neighbours.
+- `audit` / `security --deep` now report checks that errored (`[warn]`) instead of
+  silently treating them as clean.
+
 ## What's new in 0.3 -- audit-grade upgrade
 
 Built for security researchers and network auditors, all offline:
@@ -82,11 +95,25 @@ Built for security researchers and network auditors, all offline:
 sudo netscope discover
 netscope discover --method sweep              # no root, less reliable
 sudo netscope discover --fingerprint          # add banner grab + OS guess
+sudo netscope discover --names                # add hostname/model via mDNS, SSDP, NetBIOS
+sudo netscope discover --ipv6                 # IPv6 neighbours on the local link (NDP)
 sudo netscope discover --save                 # record to history
 ```
 
 Shows IP, MAC, and vendor for every device. ARP-based by default (needs root),
 falls back to a TCP ping sweep.
+
+`--names` adds a hostname and device model by asking the LAN directly (read-only,
+stdlib UDP, no root needed for this step): **mDNS** (self-announced `.local`
+names and service types), **SSDP/UPnP** (`friendlyName` / `modelName` /
+`manufacturer` from the device's description document) and **NetBIOS** node
+status (machine + workgroup name). Everything off the wire is untrusted: names are
+sanitised, UPnP descriptions are only fetched from the host that announced them
+and are never run through an XML parser, and results for IPs outside the audited
+set are discarded. `audit` does this by default on subnet audits (`--no-names` to
+skip; not run for `--host`), and turns exposed UPnP/SSDP (medium) and NetBIOS
+(low) into findings. Hostnames are saved with `--save` and shown in `history`
+and the HTML report.
 
 ### `portscan` -- check a host's open ports
 
@@ -115,7 +142,7 @@ Discovers hosts, fingerprints each service for product/version, correlates
 against the offline CVE DB, audits TLS, runs the read-only weak-auth probes,
 and rolls it all into severity-scored findings with a **0-100 risk score** per
 host and overall. `--report` also writes the HTML report; `--export` emits
-`json`/`ndjson`/`csv`/`sarif`; `--save` records a snapshot for `diff`.
+`json`/`ndjson`/`csv`/`sarif`/`markdown`; `--save` records a snapshot for `diff`.
 
 ### `security` -- risky ports, or a deep audit
 
@@ -125,8 +152,10 @@ netscope security --host 192.168.1.1 --deep           # + CVE / TLS / weak-auth
 sudo netscope security --deep --save --export csv     # audit whole LAN, export
 ```
 
-Without `--deep` it's the original fast risky-port sweep. `--deep` promotes it
-to the full finding-producing audit (same engine as `audit`).
+Without `--deep` it's the original fast risky-port sweep: it flags ports with a
+known security history (Telnet, exposed Redis/Mongo, RDP, etc.) with a short
+explanation of why each matters, and `--save` records the results. `--deep`
+promotes it to the full finding-producing audit (same engine as `audit`).
 
 ### `tls` -- inspect a TLS service
 
@@ -211,17 +240,6 @@ same ~40 common ports as `portscan`'s default -- a listener on an arbitrary high
 port won't be noticed. A transient error mid-run is logged and retried on the
 next round instead of ending the monitor.
 
-### `security` -- sweep for risky exposed ports
-
-```bash
-sudo netscope security                        # discover + scan every host
-netscope security --host 192.168.1.1          # one host, no root
-sudo netscope security --save                 # record results
-```
-
-Flags ports with a known security history (Telnet, exposed Redis/Mongo, RDP,
-etc.) with a short explanation of why each matters.
-
 ### `report` -- generate an HTML report
 
 ```bash
@@ -263,7 +281,8 @@ Most commands accept `--json` for structured output you can pipe elsewhere
 all progress and summary text goes to stderr. Empty results are still valid
 documents (`[]`, or an object with empty lists). `--json` and a stdout `--export`
 can't be combined (use `--export-out FILE`). Exit codes: `0` ok, `1` runtime
-error (printed as `Error: ...`), `2` bad arguments, `130` interrupted.
+error (printed as `Error: ...`), `2` bad arguments (including a malformed
+`--ignore-file`), `3` a `--fail-on` threshold was met, `130` interrupted.
 
 ## Project layout
 
@@ -273,6 +292,7 @@ Each capability is a small, independently-usable module under `netscope/`:
 |---|---|
 | `discovery.py` | ARP scan + ping-sweep host discovery |
 | `oui.py` | MAC to vendor lookup (bundled IEEE data) |
+| `nameservices.py` | hostname/model discovery via mDNS, SSDP/UPnP, NetBIOS |
 | `portscan.py` | threaded TCP connect + UDP scanning, timing templates |
 | `fingerprint.py` | banner grabbing + product/version + OS inference |
 | `vulndb.py` | offline CVE correlation (bundled `data/vulns.json.gz`) |
@@ -281,7 +301,10 @@ Each capability is a small, independently-usable module under `netscope/`:
 | `capture.py` | live capture / offline pcap replay + data collection |
 | `analysis.py` | passive threat detection (ARP/DHCP/scan/beacon/DNS-tunnel) |
 | `security.py` | risky-port checks + the deep audit pipeline |
-| `findings.py` | unified findings model, risk scoring, JSON/CSV/SARIF export |
+| `findings.py` | unified findings model, risk scoring, JSON/CSV/SARIF/Markdown export |
+| `config.py` | optional JSON config supplying default flag values |
+| `suppress.py` | accepted-risk rules + `--fail-on` severity gate |
+| `remediation.py` | static "how do I fix it" advice attached to every finding |
 | `storage.py` | SQLite device/port history + audit snapshots for diffing |
 | `monitor.py` | continuous monitoring loop |
 | `report.py` | standalone HTML report generation |
@@ -292,9 +315,77 @@ dicts/sets you can extend. The bundled CVE snapshot is generated from the
 curated list in `scripts/build_vulndb.py` -- edit it and re-run to regenerate
 `netscope/data/vulns.json.gz`.
 
+## Accepted risk & CI gating
+
+`audit`, `security` and `diff` take two workflow flags:
+
+```bash
+netscope audit --ignore-file accepted.txt --fail-on high      # exit 3 if an active high/critical remains
+netscope diff --fail-on high                                  # gate on *new* findings since the last snapshot
+```
+
+`--ignore-file` lists findings you have reviewed and accepted -- one rule per
+line (`#` starts the reason), or JSON:
+
+```text
+a1b2c3d4e5f6            expires=2026-12-31   # lab router, replacing in Q4
+tls:10.0.0.*:443                             # category:host:port ('*' = any, globs allowed)
+```
+
+```json
+[{"id": "a1b2c3d4e5f6", "reason": "lab router", "expires": "2026-12-31"},
+ {"category": "tls", "host": "10.0.0.*", "reason": "internal CA pending"}]
+```
+
+Each finding's id is in the JSON, NDJSON, CSV and Markdown exports (and SARIF `partialFingerprints`). Suppression is
+never silent: suppressed findings are listed with their reason after each run,
+are left out of the risk score, the saved snapshot and non-SARIF exports, but
+**stay in SARIF output marked `suppressions: accepted`** so code scanning shows them as
+dismissed rather than losing them. A rule needs at least one selector (no
+catch-all), an `expires` date stops it applying (with a warning) so exceptions
+get revisited, and a malformed file is rejected with exit 2 *before* anything is
+scanned. `--fail-on LEVEL` exits `3` if any *active* finding is at or above
+`LEVEL`, so CI can fail the build; with `diff` it considers only newly-added
+findings.
+
+## Config file
+
+Defaults you'd otherwise retype can live in `~/.netscope/config.json`:
+
+```json
+{
+  "subnet": "192.168.1.0/24",
+  "timing": 2,
+  "db": "~/audits/home.db",
+  "ignore_file": "~/audits/accepted.txt",
+  "fail_on": "high",
+  "webhook": "https://ntfy.sh/my-lan"
+}
+```
+
+Supported keys: `subnet`, `method`, `timing`, `db`, `ignore_file`, `fail_on`,
+`webhook`, `gateway`, `iface`. A key only applies to commands that have the
+matching flag, and **a flag on the command line always wins**. Values are
+validated and unknown keys are rejected (so a typo can't silently drop a safety
+setting like `fail_on`); a bad config exits `2` before anything runs.
+
+For a config kept in a project or CI repo use `netscope --config path/to/file.json audit ...`
+(before the command) or `NETSCOPE_CONFIG=path`; an explicitly named file must exist.
+A `netscope.json` in the current directory is **deliberately not** loaded
+automatically: `ignore_file` and `webhook` change what an audit reports and where data
+goes, so simply running netscope inside an untrusted checkout must not reconfigure it.
+
 ## Findings export & CI
 
-`audit`, `security --deep`, and `diff` accept `--export {json,ndjson,csv,sarif}`
+Every finding carries a `remediation` field -- static, per-category advice on
+what to do about it (renew the certificate, disable Telnet, set `requirepass`,
+...). It appears in the JSON/NDJSON/CSV/Markdown exports, in SARIF
+`properties.remediation`, and in the HTML report. It is not part of a finding's
+identity, so improving the wording never changes `diff` or suppression results.
+`--export markdown` renders a readable report grouped by host, with all
+network-derived text escaped so a hostile banner can't forge headings or links.
+
+`audit`, `security --deep`, and `diff` accept `--export {json,ndjson,csv,sarif,markdown}`
 (with `--export-out FILE`). SARIF 2.1.0 output (validated against the
 official schema) can be uploaded to GitHub code scanning, so a scheduled
 `netscope audit --export sarif` becomes a network posture check in CI. Network
@@ -332,8 +423,14 @@ its output:
   `hostInfo`, which needs authentication on a secured server -- `isMaster` is
   answered by every mongod and proves nothing. Timeouts, auth-required replies and
   malformed data produce *no* finding rather than a guess.
-- **IPv4 only.** Discovery, scanning and capture analysis are IPv4. Subnets larger
-  than a /16 are refused. Default subnet auto-detection assumes a /24.
+- **IPv6 is partial.** Targeted scans and audits accept IPv6 literals
+  (`portscan 2001:db8::10`, `audit --host fe80::1%eth0`, `tls [::1]:443`), and
+  `discover --ipv6` finds neighbours on the local link by multicast. IPv4-only:
+  subnet sweeps (a /64 can't be swept address by address), subnet auto-detection
+  (assumes a /24), `watch`, and **capture analysis** (IPv6 traffic is counted but
+  not analysed). Subnets larger than a /16 are refused. The IPv6 code paths were
+  tested with socket-level fakes; NDP discovery in particular has not been run
+  against a real link, so treat it as new.
 - **Discovery.** ARP needs root. The non-root TCP sweep treats a refused (RST)
   connection as "host is up", but silently-dropping hosts are missed.
 - **Passive detection is heuristic.** Beaconing, DNS-tunnelling, port-scan and

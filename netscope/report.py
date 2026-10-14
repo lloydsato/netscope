@@ -40,6 +40,7 @@ def _device_row(d):
     vendor = d.get("vendor") or "unknown"
     mac = d.get("mac") or "\u2014"
     hostname = d.get("hostname") or ""
+    model = d.get("model") or ""
     name_bits = f'<span class="host-ip">{_esc(d.get("ip"))}</span>'
     if hostname:
         name_bits += f'<span class="host-name">{_esc(hostname)}</span>'
@@ -47,7 +48,7 @@ def _device_row(d):
       <tr>
         <td class="mono">{name_bits}</td>
         <td class="mono muted">{_esc(mac)}</td>
-        <td>{_esc(vendor)}{f'<span class="os-tag">{_esc(os_guess)}</span>' if os_guess else ''}</td>
+        <td>{_esc(vendor)}{f'<span class="os-tag">{_esc(model)}</span>' if model else ''}{f'<span class="os-tag">{_esc(os_guess)}</span>' if os_guess else ''}</td>
         <td class="ports">{chips}</td>
       </tr>"""
 
@@ -135,7 +136,8 @@ def _findings_block(findings, host_scores):
           <li class="alert" style="--sev:{color}">
             <span class="sev-label" style="color:{color}">{_esc(f.get('severity'))}</span>
             <span class="alert-msg"><strong>{_esc(f.get('title'))}</strong>{port}
-              <span class="fdetail">{_esc(f.get('detail'))}</span> {refs}</span>
+              <span class="fdetail">{_esc(f.get('detail'))}</span> {refs}
+              {f'<span class="fix"><strong>Fix:</strong> {_esc(f["remediation"])}</span>' if f.get("remediation") else ""}</span>
           </li>""")
         blocks.append(f"""
       <div class="host-findings">
@@ -265,6 +267,7 @@ def render(devices, capture_summary=None, events=None, subnet=None,
   .risk.watch {{ color:var(--med); border-color:var(--med); }}
   .risk.ok {{ color:var(--accent); border-color:rgba(67,216,196,0.35); }}
   .fdetail {{ color:var(--muted); }}
+  .fix {{ display:block; margin-top:.25rem; font-size:.9em; }}
   .ref {{
     display:inline-block; font-family:var(--mono); font-size:11px; color:var(--accent);
     border:1px solid rgba(67,216,196,0.35); border-radius:4px; padding:0 5px; margin-left:4px;

@@ -76,7 +76,11 @@ class DiscoverTests(unittest.TestCase):
         self.assertEqual(len(hosts), 2)
 
     def test_explicit_arp_without_privileges_is_an_error_not_a_fallback(self):
-        with mock.patch.object(discovery, "is_root", return_value=False):
+        # Fake scapy so the privilege check is reached whether or not scapy is installed.
+        fake = types.ModuleType("scapy.all")
+        fake.ARP = fake.Ether = fake.srp = None
+        with mock.patch.dict(sys.modules, {"scapy.all": fake}), \
+                mock.patch.object(discovery, "is_root", return_value=False):
             with self.assertRaises(RuntimeError) as cm:
                 discovery.discover("127.0.0.0/30", "arp")
         self.assertIn("raw socket", str(cm.exception))

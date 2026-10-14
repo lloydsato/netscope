@@ -11,7 +11,7 @@ import socket
 import ssl
 import re
 
-from .utils import port_name
+from .utils import port_name, family_for, host_header
 
 # Ports where the server sends a banner immediately on connect.
 _SERVER_SPEAKS_FIRST = {21, 22, 23, 25, 110, 143, 587, 3306, 5432}
@@ -38,7 +38,7 @@ def _clean(data: bytes, limit: int = 200) -> str:
 
 def _grab_generic(host: str, port: int, timeout: float) -> str:
     try:
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        with socket.socket(family_for(host), socket.SOCK_STREAM) as s:
             s.settimeout(timeout)
             s.connect((host, port))
             data = s.recv(256)
@@ -78,7 +78,7 @@ def _grab_http(host: str, port: int, timeout: float, tls: bool = False,
             if tls:
                 sock = _permissive_tls_context().wrap_socket(raw, server_hostname=host)
             with sock:
-                req = f"{method} / HTTP/1.0\r\nHost: {host}\r\nUser-Agent: netscope\r\n\r\n"
+                req = f"{method} / HTTP/1.0\r\nHost: {host_header(host)}\r\nUser-Agent: netscope\r\n\r\n"
                 sock.sendall(req.encode())
                 data = _read_http(sock, want_body)
     except (OSError, ssl.SSLError):

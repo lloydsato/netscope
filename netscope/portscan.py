@@ -18,7 +18,7 @@ import socket
 import time
 import concurrent.futures
 
-from .utils import port_name, timing_profile, COMMON_UDP_PORTS
+from .utils import port_name, timing_profile, family_for, COMMON_UDP_PORTS
 
 COMMON_SCAN_PORTS = sorted({
     21, 22, 23, 25, 53, 67, 68, 80, 110, 111, 123, 135, 139, 143, 161,
@@ -62,16 +62,24 @@ def _clean_ports(ports):
 
 
 def _resolve(host: str) -> str:
-    """Resolve once up front (clear error) so workers don't each do a DNS lookup."""
+    """Resolve once up front (clear error) so workers don't each do a DNS lookup.
+
+    Accepts IPv4/IPv6 literals and names. A name with both A and AAAA records
+    resolves to its IPv4 address, as before; IPv6 is used when it's all there is.
+    """
     try:
-        return socket.gethostbyname(host)
+        infos = socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)
     except (socket.gaierror, UnicodeError) as e:
         raise RuntimeError(f"Could not resolve host '{host}': {e}") from e
+    if not infos:
+        raise RuntimeError(f"Could not resolve host '{host}'")
+    infos.sort(key=lambda i: i[0] != socket.AF_INET)     # stable: IPv4 first
+    return infos[0][4][0]
 
 
 def scan_port(host: str, port: int, timeout: float = 0.75):
     try:
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        with socket.socket(family_for(host), socket.SOCK_STREAM) as s:
             s.settimeout(timeout)
             if s.connect_ex((host, port)) == 0:
                 return port
@@ -124,7 +132,7 @@ def scan_udp_port(host: str, port: int, timeout: float = 1.5):
     """Probe a single UDP port. Returns 'open', 'closed', or 'open|filtered'."""
     probe = _UDP_PROBES.get(port, b"\x00")
     try:
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+        with socket.socket(family_for(host), socket.SOCK_DGRAM) as s:
             s.settimeout(timeout)
             s.connect((host, port))          # so ICMP errors come back to us
             s.send(probe)

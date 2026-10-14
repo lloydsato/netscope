@@ -23,7 +23,8 @@ import sqlite3
 import sys
 
 from . import __version__
-from . import discovery, portscan, fingerprint, oui, security, storage, report
+from . import discovery, portscan, fingerprint, oui, security, storage, report, nameservices, suppress
+from . import config as config_mod
 from . import capture as capture_mod
 from . import monitor as monitor_mod
 from . import tlsaudit, probes, findings as fmod
@@ -132,11 +133,16 @@ def _port_spec_arg(value):
         raise argparse.ArgumentTypeError(str(e)) from None
 
 
-def emit_findings_export(findings, fmt, out_path, meta=None):
-    """Render findings in `fmt` and write to `out_path` (or stdout if None)."""
+def emit_findings_export(findings, fmt, out_path, meta=None, suppressed=None):
+    """Render findings in `fmt` and write to `out_path` (or stdout if None).
+
+    SARIF additionally carries ``suppressed`` findings (marked as accepted) so
+    code-scanning shows them as dismissed instead of losing them; the other
+    formats list only the active findings.
+    """
     if not fmt:
         return
-    text = fmod.export(findings, fmt, meta=meta)
+    text = fmod.export(findings + (suppressed or []) if fmt == "sarif" else findings, fmt, meta=meta)
     if out_path:
         with open(out_path, "w", encoding="utf-8") as f:
             f.write(text)
@@ -171,21 +177,70 @@ def enrich_devices(hosts, do_fingerprint=False):
             os_guess = fp["os_guess"]
         devices.append({
             "ip": ip, "mac": h.get("mac"), "vendor": h.get("vendor", "unknown"),
+            "hostname": h.get("hostname"), "model": h.get("model"),
             "open_ports": scan_res, "os_guess": os_guess,
         })
     return devices
 
 
+# ---------- accepted-risk suppression + severity gate ----------
+
+EXIT_GATE = 3      # --fail-on threshold met by an active finding
+
+
+def _load_rules(args):
+    """Load --ignore-file up front, so a typo fails before a long audit runs."""
+    path = getattr(args, "ignore_file", None)
+    return suppress.load_rules(path) if path else []
+
+
+def _apply_rules(args, rules, findings):
+    """Split findings into (active, suppressed), reporting -- never hiding -- what was suppressed."""
+    if not rules:
+        return findings, []
+    active, suppressed, expired = suppress.apply_suppressions(findings, rules)
+    for r in expired:
+        print(f"Warning: suppression {r['where']} expired on {r['expires']}; it no longer applies.",
+              file=sys.stderr)
+    if suppressed:
+        print(f"\nSuppressed {len(suppressed)} finding(s) as accepted risk ({args.ignore_file}):")
+        for f in fmod.sort_findings(suppressed):
+            port = f":{f['port']}" if f.get("port") else ""
+            why = f["suppression"]["reason"] or "no reason given"
+            print(f"  [{(f.get('severity') or '').upper():8}] {f.get('host')}{port}  {f.get('title')}  -- {why}")
+    return active, suppressed
+
+
+def _gate_code(args, active):
+    """0, or EXIT_GATE when an active finding meets --fail-on."""
+    level = getattr(args, "fail_on", None)
+    if suppress.exceeds(active, level):
+        n = sum(1 for f in active if fmod.severity_rank(f) <= fmod.SEVERITIES.index(level))
+        print(f"\nFAIL: {n} active finding(s) at or above '{level}' (--fail-on {level}).", file=sys.stderr)
+        return EXIT_GATE
+    return 0
+
+
 # ---------- commands ----------
 
 def cmd_discover(args):
+    if args.ipv6 and args.subnet:
+        print("Error: --ipv6 discovers the local link by multicast and can't take --subnet "
+              "(an IPv6 prefix can't be swept address by address).", file=sys.stderr)
+        return 2
     try:
-        subnet, hosts, method_used = discovery.discover(args.subnet, args.method)
+        if args.ipv6:
+            hosts = discovery.ndp_scan(iface=args.iface)
+            subnet, method_used = "ipv6 (link-local multicast)", "ndp"
+        else:
+            subnet, hosts, method_used = discovery.discover(args.subnet, args.method)
     except RuntimeError as e:
         print(f"Error: {e}", file=sys.stderr)
         return 1
 
     oui.enrich_hosts(hosts)
+    if args.names and hosts:
+        nameservices.enrich_hosts(hosts)
     print(f"Subnet: {subnet}  (method: {method_used})")
     if not hosts:
         print("No hosts found.")
@@ -201,10 +256,13 @@ def cmd_discover(args):
             fp = fingerprint.fingerprint_host(h["ip"], open_ports)
             fp_map[h["ip"]] = fp["os_guess"]
 
-    headers = ["IP", "MAC", "VENDOR"] + (["OS GUESS"] if args.fingerprint else [])
+    headers = (["IP", "MAC", "VENDOR"] + (["NAME", "MODEL"] if args.names else [])
+               + (["OS GUESS"] if args.fingerprint else []))
     rows = []
     for h in hosts:
         row = [h["ip"], h.get("mac") or "-", h.get("vendor", "unknown")]
+        if args.names:
+            row += [h.get("hostname") or "-", h.get("model") or "-"]
         if args.fingerprint:
             row.append(fp_map.get(h["ip"]) or "-")
         rows.append(row)
@@ -348,6 +406,7 @@ def _no_hosts_output(args, subnet, deep):
 
 
 def cmd_security(args):
+    rules = _load_rules(args)
     subnet = None
     if args.host:
         hosts = [{"ip": args.host}]
@@ -376,8 +435,10 @@ def cmd_security(args):
         return 1
 
     if args.deep:
-        print(security.summarize_deep(results))
         all_findings = security.collect_findings(results)
+        all_findings, suppressed = _apply_rules(args, rules, all_findings)
+        suppress.apply_to_results(results, {f["id"] for f in all_findings})
+        print(security.summarize_deep(results))
         if args.save:
             conn = storage.connect(args.db)
             storage.upsert_devices(conn, hosts)
@@ -391,10 +452,10 @@ def cmd_security(args):
             conn.close()
             print(f"\nSaved audit snapshot #{sid} ({len(all_findings)} findings) to history.")
         emit_findings_export(all_findings, args.export, args.export_out,
-                             meta={"subnet": subnet, "hosts": len(results)})
+                             meta={"subnet": subnet, "hosts": len(results)}, suppressed=suppressed)
         if args.json:
             machine_out(json.dumps(results, indent=2, default=str))
-        return 0
+        return _gate_code(args, all_findings)
 
     # quick (port-heuristic) mode
     print(security.summarize(results))
@@ -405,15 +466,18 @@ def cmd_security(args):
             storage.record_ports(conn, _identity_for(r["host"], hosts), r["open_ports"])
         conn.close()
         print("\nSaved scan results to history.")
-    if args.export:
-        quick_findings = []
+    quick_findings, quick_suppressed = [], []
+    if args.export or rules or args.fail_on:
         for r in results:
             quick_findings += fmod.from_risky_ports(r["host"], r["open_ports"], RISKY_PORTS)
+        quick_findings, quick_suppressed = _apply_rules(args, rules, quick_findings)
+    if args.export:
         emit_findings_export(quick_findings, args.export, args.export_out,
-                             meta={"subnet": subnet, "hosts": len(results), "mode": "quick"})
+                             meta={"subnet": subnet, "hosts": len(results), "mode": "quick"},
+                             suppressed=quick_suppressed)
     if args.json:
         machine_out(json.dumps(results, indent=2))
-    return 0
+    return _gate_code(args, quick_findings)
 
 
 def cmd_report(args):
@@ -463,6 +527,7 @@ def cmd_report(args):
 
 def cmd_audit(args):
     """Flagship: discover -> deep audit -> scored findings -> report/export."""
+    rules = _load_rules(args)
     if args.host:
         hosts = [{"ip": args.host}]
         subnet = args.host
@@ -480,12 +545,18 @@ def cmd_audit(args):
         _no_hosts_output(args, subnet, True)
         return 0
 
+    name_findings = []
+    if not args.no_names and not args.host:      # --host is a targeted, quick audit: no LAN-wide queries
+        nameservices.enrich_hosts(hosts)
+        for h in hosts:
+            name_findings += fmod.from_nameservices(h["ip"], h.get("exposures", []), h.get("hostname", ""))
+
     try:
         results = security.deep_check_hosts(hosts, timing=args.timing)
     except RuntimeError as e:
         print(f"Error: {e}", file=sys.stderr)
         return 1
-    all_findings = security.collect_findings(results)
+    all_findings = fmod.sort_findings(fmod.dedupe(security.collect_findings(results) + name_findings))
 
     cap = None
     if args.capture_seconds > 0:
@@ -498,6 +569,8 @@ def cmd_audit(args):
         except RuntimeError as e:
             print(f"(skipping capture: {e})", file=sys.stderr)
 
+    all_findings, suppressed = _apply_rules(args, rules, all_findings)
+    suppress.apply_to_results(results, {f["id"] for f in all_findings})
     print(security.summarize_deep(results))
     counts = fmod.severity_counts(all_findings)
     print(f"\nOverall risk score: {fmod.risk_score(all_findings)}/100  "
@@ -530,13 +603,15 @@ def cmd_audit(args):
 
     emit_findings_export(all_findings, args.export, args.export_out,
                          meta={"subnet": subnet, "hosts": len(results),
-                               "risk_score": fmod.risk_score(all_findings)})
+                               "risk_score": fmod.risk_score(all_findings)},
+                         suppressed=suppressed)
     if args.json:
         machine_out(json.dumps({"subnet": subnet, "results": results,
-                                "risk_score": fmod.risk_score(all_findings)}, indent=2, default=str))
+                                "risk_score": fmod.risk_score(all_findings),
+                                "suppressed": len(suppressed)}, indent=2, default=str))
     if conn:
         conn.close()
-    return 0
+    return _gate_code(args, all_findings)
 
 
 def _print_diff(diff):
@@ -558,6 +633,7 @@ def _print_diff(diff):
 
 
 def cmd_diff(args):
+    rules = _load_rules(args)
     if (args.old is None) != (args.new is None):
         print("Error: --old and --new must be given together (or neither, to compare "
               "the newest snapshot with the one before it).", file=sys.stderr)
@@ -591,13 +667,15 @@ def cmd_diff(args):
             print(f"(note: these snapshots are for different targets: "
                   f"{old_row['subnet']} vs {new_row['subnet']})")
         diff = storage.diff_scans(conn, old_id, new_id)
+        diff["added"], suppressed = _apply_rules(args, rules, diff["added"])
         _print_diff(diff)
         if args.export:
             emit_findings_export(diff["added"], args.export, args.export_out,
-                                 meta={"diff": f"{old_id}->{new_id}", "kind": "added"})
+                                 meta={"diff": f"{old_id}->{new_id}", "kind": "added"},
+                                 suppressed=suppressed)
         if args.json:
             machine_out(json.dumps(diff, indent=2, default=str))
-        return 0
+        return _gate_code(args, diff["added"])      # gate on *new* findings: the regression signal
     finally:
         conn.close()
 
@@ -676,8 +754,9 @@ def cmd_history(args):
                 print("No devices recorded yet. Run 'netscope discover --save' first.")
             else:
                 rows = [[d["ip"], d["mac"] or "-", (d["vendor"] or "unknown")[:28],
+                         (d.get("hostname") or "-")[:28],
                          d["first_seen_h"], d["last_seen_h"]] for d in devices]
-                print(fmt_table(rows, ["IP", "MAC", "VENDOR", "FIRST SEEN", "LAST SEEN"]))
+                print(fmt_table(rows, ["IP", "MAC", "VENDOR", "NAME", "FIRST SEEN", "LAST SEEN"]))
             payload = devices
         if args.json:
             machine_out(json.dumps(payload, indent=2))
@@ -693,21 +772,38 @@ def _add_db(p):
 
 
 def _add_export(p):
-    p.add_argument("--export", choices=["json", "ndjson", "csv", "sarif"], default=None,
+    p.add_argument("--export", choices=["json", "ndjson", "csv", "sarif", "markdown"], default=None,
                    help="Export findings in a machine-readable format")
     p.add_argument("--export-out", default=None, dest="export_out",
                    help="Write the export to this file (default: stdout)")
 
 
-def build_parser():
+def _add_gate(p):
+    p.add_argument("--ignore-file", default=None, dest="ignore_file", metavar="FILE",
+                   help="Accepted-risk file: findings it matches are reported as suppressed, not active")
+    p.add_argument("--fail-on", choices=["critical", "high", "medium", "low"], default=None,
+                   dest="fail_on", help=f"Exit {EXIT_GATE} if any active finding is at/above this severity")
+
+
+def build_parser(config=None):
+    """Build the argument parser. ``config`` ({dest: value}, see netscope.config)
+    supplies per-user defaults; explicit command-line flags still win."""
     p = argparse.ArgumentParser(prog="netscope", description=__doc__.split("\n\n")[0])
     p.add_argument("--version", action="version", version=f"netscope {__version__}")
+    p.add_argument("--config", default=None, metavar="FILE",
+                   help="Settings file supplying default flag values (default: ~/.netscope/config.json; "
+                        f"or set ${config_mod.ENV_VAR}). Must come before the command.")
     sub = p.add_subparsers(dest="command", required=True)
 
     d = sub.add_parser("discover", help="Find devices on the local network")
     d.add_argument("--subnet", default=None, help=f"CIDR, e.g. 192.168.1.0/24 (default: auto, now {get_default_subnet() or 'unknown'})")
     d.add_argument("--method", choices=["auto", "arp", "sweep"], default="auto")
     d.add_argument("--fingerprint", action="store_true", help="Also grab banners and guess each device's OS")
+    d.add_argument("--names", action="store_true",
+                   help="Also resolve hostnames/models via mDNS, SSDP/UPnP and NetBIOS")
+    d.add_argument("--ipv6", action="store_true",
+                   help="Discover IPv6 neighbours on the local link instead (NDP multicast; needs root)")
+    d.add_argument("--iface", default=None, help="Interface for --ipv6 (default: scapy's default)")
     d.add_argument("--save", action="store_true", help="Save discovered devices to history")
     d.add_argument("--json", action="store_true")
     _add_db(d)
@@ -766,6 +862,7 @@ def build_parser():
     s.add_argument("--save", action="store_true", help="Save results to history")
     s.add_argument("--json", action="store_true")
     _add_export(s)
+    _add_gate(s)
     _add_db(s)
     s.set_defaults(func=cmd_security)
 
@@ -778,6 +875,8 @@ def build_parser():
                    help="Also capture N seconds of traffic for the threat feed (needs root)")
     a.add_argument("--gateway", default=None)
     a.add_argument("--iface", default=None)
+    a.add_argument("--no-names", action="store_true", dest="no_names",
+                   help="Skip mDNS/SSDP/NetBIOS name discovery (on by default for subnet audits)")
     a.add_argument("--report", default=None, metavar="FILE.html",
                    help="Also write a standalone HTML report")
     a.add_argument("--label", default=None, help="Label for the saved snapshot")
@@ -786,6 +885,7 @@ def build_parser():
                    help="After saving, show what changed vs the previous snapshot")
     a.add_argument("--json", action="store_true")
     _add_export(a)
+    _add_gate(a)
     _add_db(a)
     a.set_defaults(func=cmd_audit)
 
@@ -796,6 +896,7 @@ def build_parser():
                     help="New snapshot id (use with --old; default: newest)")
     df.add_argument("--json", action="store_true")
     _add_export(df)
+    _add_gate(df)
     _add_db(df)
     df.set_defaults(func=cmd_diff)
 
@@ -827,6 +928,9 @@ def build_parser():
     _add_db(h)
     h.set_defaults(func=cmd_history)
 
+    for sp in sub.choices.values():
+        applicable = {a.dest for a in sp._actions}
+        sp.set_defaults(**{k: v for k, v in (config or {}).items() if k in applicable})
     return p
 
 
@@ -837,7 +941,15 @@ def _wants_machine_stdout(args):
 
 def main(argv=None):
     global _machine_stream
-    parser = build_parser()
+    # --config must be known before the real parser is built, since it supplies defaults.
+    pre = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
+    pre.add_argument("--config", default=None)
+    try:
+        cfg = config_mod.load(pre.parse_known_args(argv)[0].config)
+    except config_mod.ConfigError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 2
+    parser = build_parser(cfg)
     args = parser.parse_args(argv)
     if getattr(args, "json", False) and getattr(args, "export", None) and not getattr(args, "export_out", None):
         parser.error("--json and --export both write to stdout; add --export-out FILE "
@@ -860,6 +972,9 @@ def main(argv=None):
         except (OSError, ValueError):
             pass
         return 0
+    except suppress.SuppressionError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 2
     except RuntimeError as e:
         print(f"Error: {e}", file=sys.stderr)
         return 1
