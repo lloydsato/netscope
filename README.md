@@ -35,6 +35,19 @@ python3 -m netscope.cli <command> ...
 
 ---
 
+## What's new in 0.4
+
+- **Name & service discovery** -- `discover --names` / default in `audit`: hostnames,
+  models and UPnP/NetBIOS exposure via mDNS, SSDP and NetBIOS.
+- **Remediation + Markdown export** -- every finding says how to fix it;
+  `--export markdown` and finding ids in every export.
+- **Accepted risk & CI gating** -- `--ignore-file` (with expiry) and `--fail-on`
+  (exit 3) on `audit` / `security` / `diff`.
+- **Config file** -- `~/.netscope/config.json` / `--config` for default flags.
+- **IPv6 reach** -- scan/audit IPv6 targets; `discover --ipv6` for link neighbours.
+- `audit` / `security --deep` now report checks that errored (`[warn]`) instead of
+  silently treating them as clean.
+
 ## What's new in 0.3 -- audit-grade upgrade
 
 Built for security researchers and network auditors, all offline:
@@ -83,6 +96,7 @@ sudo netscope discover
 netscope discover --method sweep              # no root, less reliable
 sudo netscope discover --fingerprint          # add banner grab + OS guess
 sudo netscope discover --names                # add hostname/model via mDNS, SSDP, NetBIOS
+sudo netscope discover --ipv6                 # IPv6 neighbours on the local link (NDP)
 sudo netscope discover --save                 # record to history
 ```
 
@@ -409,8 +423,14 @@ its output:
   `hostInfo`, which needs authentication on a secured server -- `isMaster` is
   answered by every mongod and proves nothing. Timeouts, auth-required replies and
   malformed data produce *no* finding rather than a guess.
-- **IPv4 only.** Discovery, scanning and capture analysis are IPv4. Subnets larger
-  than a /16 are refused. Default subnet auto-detection assumes a /24.
+- **IPv6 is partial.** Targeted scans and audits accept IPv6 literals
+  (`portscan 2001:db8::10`, `audit --host fe80::1%eth0`, `tls [::1]:443`), and
+  `discover --ipv6` finds neighbours on the local link by multicast. IPv4-only:
+  subnet sweeps (a /64 can't be swept address by address), subnet auto-detection
+  (assumes a /24), `watch`, and **capture analysis** (IPv6 traffic is counted but
+  not analysed). Subnets larger than a /16 are refused. The IPv6 code paths were
+  tested with socket-level fakes; NDP discovery in particular has not been run
+  against a real link, so treat it as new.
 - **Discovery.** ARP needs root. The non-root TCP sweep treats a refused (RST)
   connection as "host is up", but silently-dropping hosts are missed.
 - **Passive detection is heuristic.** Beaconing, DNS-tunnelling, port-scan and

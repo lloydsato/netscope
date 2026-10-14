@@ -20,6 +20,8 @@ import socket
 import struct
 import time
 
+from .utils import family_for, host_header
+
 
 def _finding(category, severity, title, host, port, detail, evidence=""):
     return {"category": category, "severity": severity, "title": title,
@@ -285,7 +287,7 @@ def check_elasticsearch(host, port=9200, timeout=4.0):
     try:
         with socket.create_connection((host, port), timeout=timeout) as s:
             s.settimeout(timeout)
-            req = (f"GET / HTTP/1.0\r\nHost: {host}\r\nUser-Agent: netscope\r\n\r\n")
+            req = (f"GET / HTTP/1.0\r\nHost: {host_header(host)}\r\nUser-Agent: netscope\r\n\r\n")
             s.sendall(req.encode())
             resp = _read_until_close(s).decode("latin-1", "replace")
     except OSError:
@@ -335,7 +337,7 @@ def check_snmp_default_community(host, port=161, communities=("public", "private
 
     accepted = {}         # community -> evidence
     try:
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+        with socket.socket(family_for(host), socket.SOCK_DGRAM) as s:
             s.connect((host, port))      # the kernel now drops replies from other sources
             for pkt in packets:
                 s.send(pkt)

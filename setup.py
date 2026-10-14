@@ -2,7 +2,7 @@ from setuptools import setup, find_packages
 
 setup(
     name="netscope",
-    version="0.3.0",
+    version="0.4.0",
     description="Network discovery, service/version fingerprinting, offline CVE correlation, "
                 "TLS/weak-auth auditing, passive threat detection, and exportable findings.",
     packages=find_packages(exclude=["tests", "tests.*"]),

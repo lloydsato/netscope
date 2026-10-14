@@ -224,8 +224,16 @@ def _gate_code(args, active):
 # ---------- commands ----------
 
 def cmd_discover(args):
+    if args.ipv6 and args.subnet:
+        print("Error: --ipv6 discovers the local link by multicast and can't take --subnet "
+              "(an IPv6 prefix can't be swept address by address).", file=sys.stderr)
+        return 2
     try:
-        subnet, hosts, method_used = discovery.discover(args.subnet, args.method)
+        if args.ipv6:
+            hosts = discovery.ndp_scan(iface=args.iface)
+            subnet, method_used = "ipv6 (link-local multicast)", "ndp"
+        else:
+            subnet, hosts, method_used = discovery.discover(args.subnet, args.method)
     except RuntimeError as e:
         print(f"Error: {e}", file=sys.stderr)
         return 1
@@ -793,6 +801,9 @@ def build_parser(config=None):
     d.add_argument("--fingerprint", action="store_true", help="Also grab banners and guess each device's OS")
     d.add_argument("--names", action="store_true",
                    help="Also resolve hostnames/models via mDNS, SSDP/UPnP and NetBIOS")
+    d.add_argument("--ipv6", action="store_true",
+                   help="Discover IPv6 neighbours on the local link instead (NDP multicast; needs root)")
+    d.add_argument("--iface", default=None, help="Interface for --ipv6 (default: scapy's default)")
     d.add_argument("--save", action="store_true", help="Save discovered devices to history")
     d.add_argument("--json", action="store_true")
     _add_db(d)
